@@ -81,8 +81,11 @@ std::variant<std::pair<int, int>, renderer::RenderError> probe_size(const std::s
 
 std::variant<std::vector<uint8_t>, renderer::RenderError> decode_rgba(const std::string& path,
                                                                      int64_t byte_count) {
-    const std::string command =
-        "ffmpeg -v error -i " + shell_quote(path) + " -frames:v 1 -f rawvideo -pix_fmt rgba -";
+    // -noautorotate keeps the decoded pixel layout identical to the probed
+    // width/height: a file carrying a rotation tag is not silently transposed,
+    // so the raw RGBA buffer always matches the dimensions we sized it for.
+    const std::string command = "ffmpeg -v error -noautorotate -i " + shell_quote(path) +
+                                " -frames:v 1 -f rawvideo -pix_fmt rgba -";
 
     std::unique_ptr<std::FILE, PipeCloser> pipe(popen(command.c_str(), "r"));
     if (!pipe) {

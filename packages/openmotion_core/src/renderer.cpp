@@ -218,9 +218,9 @@ int clamp_texel(double value, int dimension) {
 }
 
 struct Sample {
-    double red = 0.0;
-    double green = 0.0;
-    double blue = 0.0;
+    double red = 0.0;    // premultiplied by alpha/255
+    double green = 0.0;  // premultiplied by alpha/255
+    double blue = 0.0;   // premultiplied by alpha/255
     double alpha = 0.0;
 };
 
@@ -233,30 +233,71 @@ double texel_channel(const Texture& texture, int x, int y, int channel) {
     return static_cast<double>(texture.rgba[index]);
 }
 
+// Bilinear weights of a continuous coordinate: the lower texel index (clamped
+// to the edge) and its fractional weight.
+struct AxisWeights {
+    int low = 0;
+    int high = 0;
+    double frac = 0.0;
+};
+
+AxisWeights axis_weights(double texel, int dimension) {
+    const double base = std::floor(texel - 0.5);
+    AxisWeights weights;
+    weights.low = clamp_texel(base, dimension);
+    weights.high = clamp_texel(base + 1.0, dimension);
+    weights.frac = (texel - 0.5) - base;
+    return weights;
+}
+
+// Filters one straight channel (used for alpha) over the four texels around
+// (tx, ty).
+double sample_channel(const Texture& texture, const AxisWeights& x_weights,
+                      const AxisWeights& y_weights, int channel) {
+    const double top = texel_channel(texture, x_weights.low, y_weights.low, channel) *
+                           (1.0 - x_weights.frac) +
+                       texel_channel(texture, x_weights.high, y_weights.low, channel) *
+                           x_weights.frac;
+    const double bottom = texel_channel(texture, x_weights.low, y_weights.high, channel) *
+                              (1.0 - x_weights.frac) +
+                          texel_channel(texture, x_weights.high, y_weights.high, channel) *
+                              x_weights.frac;
+    return top * (1.0 - y_weights.frac) + bottom * y_weights.frac;
+}
+
+// Filters one colour channel with every texel premultiplied by its own alpha,
+// so fully transparent texels contribute no colour to the result.
+double sample_premultiplied_channel(const Texture& texture, const AxisWeights& x_weights,
+                                    const AxisWeights& y_weights, int channel) {
+    const auto weighted = [&](int x, int y) {
+        return texel_channel(texture, x, y, channel) * texel_channel(texture, x, y, 3) / 255.0;
+    };
+    const double top = weighted(x_weights.low, y_weights.low) * (1.0 - x_weights.frac) +
+                       weighted(x_weights.high, y_weights.low) * x_weights.frac;
+    const double bottom = weighted(x_weights.low, y_weights.high) * (1.0 - x_weights.frac) +
+                          weighted(x_weights.high, y_weights.high) * x_weights.frac;
+    return top * (1.0 - y_weights.frac) + bottom * y_weights.frac;
+}
+
 // Bilinear sample at continuous texel coordinates (tx, ty) in
-// [0, width) x [0, height), clamped to the edge.
+// [0, width) x [0, height), clamped to the edge. Filtering happens in
+// premultiplied alpha and the colour is un-premultiplied afterwards, so a
+// fully transparent texel never bleeds its (undefined) colour into opaque
+// neighbours -- the dark or coloured halos seen around transparent PNG edges.
 Sample sample_bilinear(const Texture& texture, double tx, double ty) {
-    const double fx = tx - 0.5;
-    const double fy = ty - 0.5;
-    const double base_x = std::floor(fx);
-    const double base_y = std::floor(fy);
-    const double frac_x = fx - base_x;
-    const double frac_y = fy - base_y;
+    const AxisWeights x_weights = axis_weights(tx, texture.width);
+    const AxisWeights y_weights = axis_weights(ty, texture.height);
 
-    const int x0 = clamp_texel(base_x, texture.width);
-    const int x1 = clamp_texel(base_x + 1.0, texture.width);
-    const int y0 = clamp_texel(base_y, texture.height);
-    const int y1 = clamp_texel(base_y + 1.0, texture.height);
-
+    const double alpha = sample_channel(texture, x_weights, y_weights, 3);
     Sample sample;
-    double* channels[4] = {&sample.red, &sample.green, &sample.blue, &sample.alpha};
-    for (int channel = 0; channel < 4; ++channel) {
-        const double top = texel_channel(texture, x0, y0, channel) * (1.0 - frac_x) +
-                           texel_channel(texture, x1, y0, channel) * frac_x;
-        const double bottom = texel_channel(texture, x0, y1, channel) * (1.0 - frac_x) +
-                              texel_channel(texture, x1, y1, channel) * frac_x;
-        *channels[channel] = top * (1.0 - frac_y) + bottom * frac_y;
+    sample.alpha = alpha;
+    if (alpha <= 0.0) {
+        return sample;  // fully transparent: colour is irrelevant
     }
+    const double scale = 255.0 / alpha;  // un-premultiply
+    sample.red = sample_premultiplied_channel(texture, x_weights, y_weights, 0) * scale;
+    sample.green = sample_premultiplied_channel(texture, x_weights, y_weights, 1) * scale;
+    sample.blue = sample_premultiplied_channel(texture, x_weights, y_weights, 2) * scale;
     return sample;
 }
 
@@ -421,7 +462,9 @@ std::optional<RenderError> render_to_mp4(const project::Project& p, const std::s
     const std::string command =
         "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgba -s " + std::to_string(p.width) + "x" +
         std::to_string(p.height) + " -r " + format_fps(p.fps) +
-        " -i - -an -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2\" -pix_fmt yuv420p " +
+        " -i - -an -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
+        "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p\""
+        " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv " +
         internal::shell_quote(out_path);
 
     ScopedSigpipeIgnore sigpipe_guard;

@@ -6,9 +6,14 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -74,6 +79,74 @@ void pixel(const renderer::Frame& frame, int x, int y, int& red, int& green, int
 bool command_available(const std::string& name) {
     const std::string command = "command -v " + name + " > /dev/null 2>&1";
     return std::system(command.c_str()) == 0;
+}
+
+// Runs `command` and returns its stdout (empty on failure).
+std::string capture_command(const std::string& command) {
+    std::string output;
+    std::unique_ptr<std::FILE, int (*)(std::FILE*)> pipe(popen(command.c_str(), "r"), pclose);
+    if (!pipe) {
+        return output;
+    }
+    char buffer[256];
+    std::size_t read = 0;
+    while ((read = std::fread(buffer, 1, sizeof(buffer), pipe.get())) != 0) {
+        output.append(buffer, read);
+    }
+    return output;
+}
+
+// Splices a minimal Exif APP1 segment carrying an IFD0 Orientation tag right
+// after the JPEG SOI marker, so the file advertises a rotation without its
+// stored pixel dimensions changing.
+bool inject_exif_orientation(const std::filesystem::path& path, int orientation) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    const std::vector<char> data((std::istreambuf_iterator<char>(input)),
+                                 std::istreambuf_iterator<char>());
+    input.close();
+    if (data.size() < 2 || static_cast<unsigned char>(data[0]) != 0xFF ||
+        static_cast<unsigned char>(data[1]) != 0xD8) {
+        return false;
+    }
+
+    std::vector<uint8_t> payload;
+    const auto put16 = [&payload](uint16_t value) {
+        payload.push_back(static_cast<uint8_t>(value & 0xFF));
+        payload.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    };
+    const auto put32 = [&put16](uint32_t value) {
+        put16(static_cast<uint16_t>(value & 0xFFFF));
+        put16(static_cast<uint16_t>((value >> 16) & 0xFFFF));
+    };
+    payload.insert(payload.end(), {'E', 'x', 'i', 'f', 0, 0});  // Exif\0\0
+    payload.insert(payload.end(), {'I', 'I'});                  // little-endian TIFF
+    put16(0x002A);
+    put32(8);       // IFD0 at offset 8
+    put16(1);       // one entry
+    put16(0x0112);  // Orientation
+    put16(3);       // SHORT
+    put32(1);       // count
+    put16(static_cast<uint16_t>(orientation));
+    put16(0);  // value padded to 4 bytes
+    put32(0);  // no next IFD
+
+    const std::size_t segment_length = payload.size() + 2;
+    std::vector<uint8_t> segment = {0xFF, 0xE1, static_cast<uint8_t>((segment_length >> 8) & 0xFF),
+                                    static_cast<uint8_t>(segment_length & 0xFF)};
+    segment.insert(segment.end(), payload.begin(), payload.end());
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        return false;
+    }
+    output.write(reinterpret_cast<const char*>(data.data()), 2);
+    output.write(reinterpret_cast<const char*>(segment.data()),
+                 static_cast<std::streamsize>(segment.size()));
+    output.write(data.data() + 2, static_cast<std::streamsize>(data.size() - 2));
+    return static_cast<bool>(output);
 }
 
 renderer::Texture make_texture(int width, int height, std::vector<uint8_t> rgba) {
@@ -525,4 +598,119 @@ TEST_CASE("an image loaded through ffmpeg renders", "[renderer]") {
     CHECK(red > 200);
     CHECK(green < 60);
     CHECK(blue < 60);
+}
+
+TEST_CASE("bilinear filtering of transparent edges stays premultiplied", "[renderer]") {
+    // 2x2 texture: transparent red at (0,0), opaque white everywhere else. A
+    // straight-alpha filter would pull the (undefined) red colour of the
+    // transparent texel into the sample; premultiplied filtering must not.
+    const std::vector<uint8_t> texels = {
+        255, 0,   0,   0,    // (0,0) transparent red
+        255, 255, 255, 255,  // (1,0) opaque white
+        255, 255, 255, 255,  // (0,1) opaque white
+        255, 255, 255, 255,  // (1,1) opaque white
+    };
+
+    // Canvas 4x4, the 2x2 image scaled 2x to 4x4 centred at (2,2). The pixel at
+    // (1,1) lands between the transparent texel and an opaque one, so it is a
+    // genuine blend rather than an exact texel hit.
+    Project project = make_project(4, 4, 30.0, 1000);
+    Layer image = make_layer("img", LayerType::Image, 0, 1000);
+    image.source = "edge";
+    image.transform.x.constant = 2.0;
+    image.transform.y.constant = 2.0;
+    image.transform.scale_x.constant = 2.0;
+    image.transform.scale_y.constant = 2.0;
+    project.layers.push_back(image);
+
+    const renderer::Frame& frame =
+        rendered_with_image(project, 0, "edge", make_texture(2, 2, texels));
+
+    // Blended over the black canvas with alpha ~0.44, premultiplied filtering
+    // keeps the three channels equal; straight-alpha filtering would tint it
+    // red (red ~112, green ~ blue ~49) and darken the green/blue channels.
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 1, 1, red, green, blue);
+    CHECK(red == green);
+    CHECK(green == blue);
+    CHECK(red >= 100);
+}
+
+TEST_CASE("render_to_mp4 tags output as BT.709", "[renderer]") {
+    if (!command_available("ffmpeg") || !command_available("ffprobe")) {
+        SKIP("ffmpeg/ffprobe are not available");
+    }
+
+    Project project = make_project(16, 16, 10.0, 200);
+    Layer solid = make_layer("bg", LayerType::Solid, 0, 200);
+    solid.color = "#c82828";
+    project.layers.push_back(solid);
+
+    const std::filesystem::path output =
+        std::filesystem::temp_directory_path() /
+        ("openmotion_bt709_" + std::to_string(::getpid()) + ".mp4");
+
+    const std::optional<renderer::RenderError> result =
+        renderer::render_to_mp4(project, output.string());
+    REQUIRE_FALSE(result.has_value());
+
+    const std::string probe = "ffprobe -v error -select_streams v:0 "
+                              "-show_entries stream=color_space,color_primaries,color_transfer,"
+                              "color_range -of default=noprint_wrappers=1 " +
+                              openmotion::internal::shell_quote(output.string());
+    const std::string info = capture_command(probe);
+
+    std::error_code ignored;
+    std::filesystem::remove(output, ignored);
+
+    CHECK(info.find("color_space=bt709") != std::string::npos);
+    CHECK(info.find("color_primaries=bt709") != std::string::npos);
+    CHECK(info.find("color_transfer=bt709") != std::string::npos);
+    CHECK(info.find("color_range=tv") != std::string::npos);
+}
+
+TEST_CASE("the image loader ignores rotation tags", "[renderer]") {
+    if (!command_available("ffmpeg") || !command_available("ffprobe")) {
+        SKIP("ffmpeg/ffprobe are not available");
+    }
+
+    const std::filesystem::path jpeg =
+        std::filesystem::temp_directory_path() /
+        ("openmotion_rotated_" + std::to_string(::getpid()) + ".jpg");
+
+    // 32x8 image with a green patch in the top-left corner.
+    const std::string generate =
+        "ffmpeg -v error -y -f lavfi -i color=c=red:s=32x8 "
+        "-vf \"drawbox=x=0:y=0:w=8:h=8:color=green:t=fill\" -frames:v 1 " +
+        openmotion::internal::shell_quote(jpeg.string());
+    REQUIRE(std::system(generate.c_str()) == 0);
+
+    // Splice in a minimal Exif APP1 block with Orientation = 6 (rotate 90 CW).
+    REQUIRE(inject_exif_orientation(jpeg, 6));
+
+    const std::variant<renderer::Texture, renderer::RenderError> loaded =
+        openmotion::internal::load_image(jpeg.string());
+
+    std::error_code ignored;
+    std::filesystem::remove(jpeg, ignored);
+
+    REQUIRE(std::holds_alternative<renderer::Texture>(loaded));
+    const renderer::Texture& texture = std::get<renderer::Texture>(loaded);
+
+    // The loader must keep the stored (un-rotated) dimensions, not the 8x32 the
+    // rotation tag would imply.
+    CHECK(texture.width == 32);
+    CHECK(texture.height == 8);
+
+    const auto channel = [&](int x, int y, int c) {
+        return static_cast<int>(
+            texture.rgba[(static_cast<std::size_t>(y) * static_cast<std::size_t>(texture.width) +
+                          static_cast<std::size_t>(x)) *
+                             4 +
+                         static_cast<std::size_t>(c)]);
+    };
+    CHECK(channel(2, 2, 1) > 90);    // top-left patch stays green (#008000)
+    CHECK(channel(2, 2, 0) < 60);
+    CHECK(channel(28, 6, 0) > 150);  // far corner stays red
+    CHECK(channel(28, 6, 1) < 60);
 }
