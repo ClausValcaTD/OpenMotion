@@ -34,7 +34,8 @@ add_library(openmotion_core STATIC
     src/renderer.cpp
     src/keyframe.cpp
     src/compositor.cpp
-    src/effects.cpp)
+    src/effects.cpp
+    src/project.cpp)
 
 add_library(OpenMotion::openmotion_core ALIAS openmotion_core)
 
@@ -64,12 +65,17 @@ include(CTest)
 
 if(BUILD_TESTING)
     add_executable(openmotion_tests
-        tests/test_media.cpp)
+        tests/test_media.cpp
+        tests/test_project.cpp)
 
     target_link_libraries(openmotion_tests
         PRIVATE
             OpenMotion::openmotion_core
             Catch2::Catch2WithMain)
+
+    target_compile_definitions(openmotion_tests
+        PRIVATE
+            OPENMOTION_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
     target_compile_options(openmotion_tests
         PRIVATE

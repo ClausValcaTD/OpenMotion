@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "Hello OpenMotion",
+  "width": 1280,
+  "height": 720,
+  "fps": 30.0,
+  "duration_ms": 3000,
+  "layers": [
+    {
+      "id": "bg",
+      "type": "solid",
+      "name": "Background",
+      "start_ms": 0,
+      "end_ms": 3000,
+      "transform": {
+        "x": 0.0,
+        "y": 0.0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "rotation": 0.0,
+        "opacity": 1.0
+      },
+      "color": "#101018",
+      "text": "",
+      "source": "",
+      "width": 0.0,
+      "height": 0.0
+    },
+    {
+      "id": "box",
+      "type": "rect",
+      "name": "Box",
+      "start_ms": 0,
+      "end_ms": 3000,
+      "transform": {
+        "x": {
+          "keyframes": [
+            { "t": 0, "v": 0.0, "easing": "linear" },
+            { "t": 1500, "v": 400.0, "easing": "ease_in_out" },
+            { "t": 3000, "v": 800.0, "easing": "linear" }
+          ]
+        },
+        "y": 360.0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "rotation": 0.0,
+        "opacity": 0.75
+      },
+      "color": "#e04030",
+      "text": "",
+      "source": "",
+      "width": 200.0,
+      "height": 120.0
+    }
+  ]
+}
