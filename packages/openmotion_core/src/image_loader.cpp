@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "internal/image_loader.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -129,6 +130,52 @@ bool is_supported_image_size(int width, int height) {
     }
     const int64_t bytes = static_cast<int64_t>(width) * static_cast<int64_t>(height) * 4;
     return bytes > 0 && bytes <= kMaxImageBytes;
+}
+
+std::variant<MediaInfo, renderer::RenderError> probe_media(const std::string& path) {
+    const std::string command =
+        "ffprobe -v error -select_streams v:0 "
+        "-show_entries stream=width,height:format=duration -of json " +
+        shell_quote(path);
+
+    const std::optional<std::string> output = run_command(command);
+    if (!output.has_value()) {
+        return renderer::RenderError{"cannot read media " + path + ": ffprobe failed"};
+    }
+
+    nlohmann::json document;
+    try {
+        document = nlohmann::json::parse(*output);
+    } catch (const nlohmann::json::exception&) {
+        return renderer::RenderError{"cannot read media " + path + ": invalid ffprobe output"};
+    }
+
+    if (!document.contains("streams") || !document["streams"].is_array() ||
+        document["streams"].empty()) {
+        return renderer::RenderError{"cannot read media " + path + ": no video stream"};
+    }
+    const nlohmann::json& stream = document["streams"].front();
+    if (!stream.contains("width") || !stream.contains("height")) {
+        return renderer::RenderError{"cannot read media " + path + ": missing dimensions"};
+    }
+
+    MediaInfo info;
+    info.width = stream["width"].get<int>();
+    info.height = stream["height"].get<int>();
+
+    // Duration arrives as a string (seconds) and is absent for images.
+    if (document.contains("format") && document["format"].is_object() &&
+        document["format"].contains("duration") && document["format"]["duration"].is_string()) {
+        try {
+            const double seconds = std::stod(document["format"]["duration"].get<std::string>());
+            if (std::isfinite(seconds) && seconds > 0.0) {
+                info.duration_ms = static_cast<int64_t>(seconds * 1000.0);
+            }
+        } catch (const std::exception&) {
+            // Leave the duration at 0 (unknown) rather than failing the probe.
+        }
+    }
+    return info;
 }
 
 std::variant<renderer::Texture, renderer::RenderError> load_image(const std::string& path) {

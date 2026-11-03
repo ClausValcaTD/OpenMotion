@@ -4,12 +4,17 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include "openmotion/project.hpp"
+
+namespace openmotion::internal {
+class VideoStream;  // defined in src/internal/video_stream.hpp
+}  // namespace openmotion::internal
 
 namespace openmotion::renderer {
 
@@ -30,6 +35,9 @@ struct RenderError {
 struct RenderCache {
     std::string base_dir;                   // for relative sources
     std::map<std::string, Texture> images;  // key = layer.source
+    // Open video decoders, keyed by layer.id. shared_ptr keeps VideoStream an
+    // incomplete type here; each decoder's position is advanced frame by frame.
+    std::map<std::string, std::shared_ptr<internal::VideoStream>> videos;
 };
 
 // Renders the composition at time t_ms. Layers are drawn bottom to top; only

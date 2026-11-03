@@ -17,6 +17,7 @@
 
 #include "internal/image_loader.hpp"
 #include "internal/shell_quote.hpp"
+#include "internal/video_stream.hpp"
 #include "openmotion/keyframe.hpp"
 
 namespace openmotion::renderer {
@@ -416,8 +417,50 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             continue;
         }
 
+        // Video layers: layer.source is a video file (resolved against
+        // cache.base_dir like images). The clip starts at layer.start_ms; the
+        // source time for timeline time t_ms is (t_ms - start_ms), with no trim
+        // or speed. The frame index is round((t_ms - start_ms) * project_fps /
+        // 1000) and ffmpeg resamples the source to the project fps. Geometry is
+        // identical to Image layers; when the clip ends the last frame is held.
+        if (layer.type == project::LayerType::Video) {
+            auto stream_it = cache.videos.find(layer.id);
+            if (stream_it == cache.videos.end()) {
+                std::variant<std::unique_ptr<internal::VideoStream>, RenderError> opened =
+                    internal::VideoStream::open(resolve_source(cache, layer.source), p.fps);
+                if (const auto* error = std::get_if<RenderError>(&opened)) {
+                    return *error;
+                }
+                std::shared_ptr<internal::VideoStream> stream =
+                    std::move(std::get<std::unique_ptr<internal::VideoStream>>(opened));
+                stream_it = cache.videos.emplace(layer.id, std::move(stream)).first;
+            }
+
+            const int64_t wanted_index =
+                internal::video_frame_index(layer.start_ms, t_ms, p.fps);
+            std::variant<internal::VideoFrame, RenderError> decoded =
+                stream_it->second->frame_at(wanted_index);
+            if (const auto* error = std::get_if<RenderError>(&decoded)) {
+                return *error;
+            }
+            internal::VideoFrame source_frame =
+                std::move(std::get<internal::VideoFrame>(decoded));
+
+            Texture texture;
+            texture.width = source_frame.width;
+            texture.height = source_frame.height;
+            texture.rgba = std::move(source_frame.rgba);
+
+            const bool explicit_size = layer.width > 0.0 && layer.height > 0.0;
+            const double width = explicit_size ? layer.width : texture.width;
+            const double height = explicit_size ? layer.height : texture.height;
+            draw_image(frame, texture, transform.x, transform.y, width, height, transform.scale_x,
+                       transform.scale_y, transform.rotation, alpha);
+            continue;
+        }
+
         if (layer.type != project::LayerType::Solid && layer.type != project::LayerType::Rect) {
-            continue;  // text / video layers are not rendered yet
+            continue;  // text layers are not rendered yet
         }
 
         uint8_t red = 0, green = 0, blue = 0;
