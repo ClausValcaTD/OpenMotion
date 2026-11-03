@@ -32,6 +32,7 @@ FetchContent_MakeAvailable(nlohmann_json Catch2)
 add_library(openmotion_core STATIC
     src/media.cpp
     src/renderer.cpp
+    src/image_loader.cpp
     src/keyframe.cpp
     src/compositor.cpp
     src/effects.cpp

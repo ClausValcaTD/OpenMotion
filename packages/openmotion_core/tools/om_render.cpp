@@ -9,6 +9,22 @@
 #include "openmotion/project.hpp"
 #include "openmotion/renderer.hpp"
 
+namespace {
+
+// Parent directory of `path`, or "." when it has none.
+std::string parent_dir(const std::string& path) {
+    const std::size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) {
+        return ".";
+    }
+    if (slash == 0) {
+        return "/";
+    }
+    return path.substr(0, slash);
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         std::cerr << "usage: om-render <input.omproj> <output.mp4>\n";
@@ -26,8 +42,10 @@ int main(int argc, char** argv) {
     }
     const openmotion::project::Project& project = std::get<openmotion::project::Project>(loaded);
 
+    openmotion::renderer::RenderCache cache;
+    cache.base_dir = parent_dir(input_path);
     const std::optional<openmotion::renderer::RenderError> result =
-        openmotion::renderer::render_to_mp4(project, output_path);
+        openmotion::renderer::render_to_mp4(project, output_path, cache);
     if (result.has_value()) {
         std::cerr << "om-render: " << result->message << "\n";
         return 1;
