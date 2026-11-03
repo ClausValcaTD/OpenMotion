@@ -28,7 +28,7 @@ struct Transform {
     Property x, y, scale_x, scale_y, rotation, opacity;
 };
 
-enum class LayerType { Solid, Rect, Text, Video, Image };
+enum class LayerType { Solid, Rect, Text, Video, Image, Audio };
 
 struct Layer {
     std::string id;
@@ -39,8 +39,10 @@ struct Layer {
     Transform   transform;
     std::string color;   // "#RRGGBB", used by Solid/Rect
     std::string text;    // used by Text
-    std::string source;  // file path, used by Video/Image
+    std::string source;  // file path, used by Video/Image/Audio
     double      width = 0, height = 0;  // used by Rect
+    int64_t     in_ms = 0;              // source offset, used by Audio
+    double      volume = 1.0;           // 0..10, used by Audio
 };
 
 struct Project {

@@ -46,7 +46,7 @@ bool layers_equal(const Layer& lhs, const Layer& rhs) {
            lhs.start_ms == rhs.start_ms && lhs.end_ms == rhs.end_ms &&
            transforms_equal(lhs.transform, rhs.transform) && lhs.color == rhs.color &&
            lhs.text == rhs.text && lhs.source == rhs.source && lhs.width == rhs.width &&
-           lhs.height == rhs.height;
+           lhs.height == rhs.height && lhs.in_ms == rhs.in_ms && lhs.volume == rhs.volume;
 }
 
 bool projects_equal(const Project& lhs, const Project& rhs) {
@@ -240,4 +240,87 @@ TEST_CASE("save_to_file and load_from_file round trip", "[project]") {
     // Layers without a "transform" key fall back to scale/opacity defaults of 1.
     CHECK(std::get<Project>(reloaded).layers[0].transform.scale_x.constant == 1.0);
     CHECK(std::get<Project>(reloaded).layers[0].transform.opacity.constant == 1.0);
+}
+
+TEST_CASE("audio layer JSON round trips", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "audio", "start_ms": 0, "end_ms": 1000,
+          "source": "music.wav", "in_ms": 250, "volume": 0.5 }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+
+    const Layer& layer = std::get<Project>(loaded).layers[0];
+    CHECK(layer.type == LayerType::Audio);
+    CHECK(layer.in_ms == 250);
+    CHECK(layer.volume == 0.5);
+
+    const std::variant<Project, ProjectError> reloaded =
+        project::load_from_string(project::to_json_string(std::get<Project>(loaded)));
+    REQUIRE(std::holds_alternative<Project>(reloaded));
+    CHECK(projects_equal(std::get<Project>(loaded), std::get<Project>(reloaded)));
+
+    // in_ms/volume are always written for audio layers.
+    const std::string encoded = project::to_json_string(std::get<Project>(reloaded));
+    CHECK(encoded.find("\"in_ms\"") != std::string::npos);
+    CHECK(encoded.find("\"volume\"") != std::string::npos);
+}
+
+TEST_CASE("audio layer defaults apply when in_ms and volume are missing", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "audio", "start_ms": 0, "end_ms": 1000, "source": "music.wav" }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+
+    const Layer& layer = std::get<Project>(loaded).layers[0];
+    CHECK(layer.in_ms == 0);
+    CHECK(layer.volume == 1.0);
+}
+
+TEST_CASE("non-audio layers omit in_ms and volume", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "solid", "start_ms": 0, "end_ms": 1000, "color": "#000000" }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+
+    const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+    CHECK(encoded.find("\"in_ms\"") == std::string::npos);
+    CHECK(encoded.find("\"volume\"") == std::string::npos);
+}
+
+TEST_CASE("audio layer validation rejects invalid values", "[project]") {
+    const std::string base = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "audio", "start_ms": 0, "end_ms": 1000,
+          "source": "music.wav", "in_ms": 0, "volume": 1.0 }
+      ]
+    })";
+
+    SECTION("negative in_ms") {
+        CHECK(is_error(project::load_from_string(with_replaced(base, "\"in_ms\": 0", "\"in_ms\": -1"))));
+    }
+
+    SECTION("volume below zero") {
+        CHECK(is_error(project::load_from_string(with_replaced(base, "\"volume\": 1.0", "\"volume\": -0.1"))));
+    }
+
+    SECTION("volume above ten") {
+        CHECK(is_error(project::load_from_string(with_replaced(base, "\"volume\": 1.0", "\"volume\": 10.1"))));
+    }
+
+    SECTION("volume far out of range") {
+        CHECK(is_error(project::load_from_string(with_replaced(base, "\"volume\": 1.0", "\"volume\": 1e300"))));
+    }
 }

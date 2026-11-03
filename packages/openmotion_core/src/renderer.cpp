@@ -14,7 +14,11 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
+#include <nlohmann/json.hpp>
+
+#include "internal/audio_mix.hpp"
 #include "internal/image_loader.hpp"
 #include "internal/shell_quote.hpp"
 #include "internal/video_stream.hpp"
@@ -356,6 +360,56 @@ std::string format_fps(double fps) {
     return std::string(buffer);
 }
 
+// Runs `command` and captures stdout, returning nullopt when the process cannot
+// be started or exits non-zero.
+std::optional<std::string> run_command(const std::string& command) {
+    std::unique_ptr<std::FILE, PipeCloser> pipe(popen(command.c_str(), "r"));
+    if (!pipe) {
+        return std::nullopt;
+    }
+    std::string output;
+    char buffer[256];
+    std::size_t read = 0;
+    while ((read = std::fread(buffer, 1, sizeof(buffer), pipe.get())) != 0) {
+        output.append(buffer, read);
+    }
+    if (pclose(pipe.release()) != 0) {
+        return std::nullopt;
+    }
+    return output;
+}
+
+// True when `path` exists and its first audio stream is a decodable audio
+// stream. Used to fail early (before ffmpeg starts) with a path-bearing error.
+bool has_audio_stream(const std::string& path) {
+    const std::string command =
+        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of json " +
+        internal::shell_quote(path);
+    const std::optional<std::string> output = run_command(command);
+    if (!output.has_value()) {
+        return false;
+    }
+    nlohmann::json document;
+    try {
+        document = nlohmann::json::parse(*output);
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    if (!document.contains("streams") || !document["streams"].is_array() ||
+        document["streams"].empty()) {
+        return false;
+    }
+    const nlohmann::json& stream = document["streams"].front();
+    return stream.contains("codec_type") && stream["codec_type"].is_string() &&
+           stream["codec_type"].get<std::string>() == "audio";
+}
+
+// Renders `value` milliseconds as a locale-independent seconds string, e.g.
+// 500 -> "0.500".
+std::string format_ms_as_seconds(int64_t value) {
+    return internal::format_fixed(static_cast<double>(value) / 1000.0, 3);
+}
+
 }  // namespace
 
 std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t t_ms) {
@@ -459,6 +513,12 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             continue;
         }
 
+        // Audio layers carry no pixels; they are mixed into the output by
+        // render_to_mp4 instead of being drawn.
+        if (layer.type == project::LayerType::Audio) {
+            continue;
+        }
+
         if (layer.type != project::LayerType::Solid && layer.type != project::LayerType::Rect) {
             continue;  // text layers are not rendered yet
         }
@@ -502,13 +562,52 @@ std::optional<RenderError> render_to_mp4(const project::Project& p, const std::s
         return RenderError{"project produces no frames"};
     }
 
-    const std::string command =
+    // Collect and validate the audio layers before starting ffmpeg, so a missing
+    // file or a file without audio fails fast with an error that names the path.
+    std::vector<internal::AudioInput> audio_inputs;
+    for (const project::Layer& layer : p.layers) {
+        if (layer.type != project::LayerType::Audio) {
+            continue;
+        }
+        const std::string path = resolve_source(cache, layer.source);
+        if (!has_audio_stream(path)) {
+            return RenderError{"audio layer " + layer.id + ": no audio stream in " + path};
+        }
+        internal::AudioInput input;
+        input.path = path;
+        input.start_ms = layer.start_ms;
+        input.end_ms = layer.end_ms;
+        input.in_ms = layer.in_ms;
+        input.volume = layer.volume;
+        audio_inputs.push_back(std::move(input));
+    }
+
+    std::string command =
         "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgba -s " + std::to_string(p.width) + "x" +
-        std::to_string(p.height) + " -r " + format_fps(p.fps) +
-        " -i - -an -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
-        "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p\""
-        " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv " +
-        internal::shell_quote(out_path);
+        std::to_string(p.height) + " -r " + format_fps(p.fps) + " -i -";
+
+    // One input per audio layer, trimmed to the layer's source range.
+    for (const internal::AudioInput& input : audio_inputs) {
+        command += " -ss " + format_ms_as_seconds(input.in_ms) + " -t " +
+                   format_ms_as_seconds(input.end_ms - input.start_ms) + " -i " +
+                   internal::shell_quote(input.path);
+    }
+
+    if (audio_inputs.empty()) {
+        // Unchanged silent path: no audio stream in the output.
+        command +=
+            " -an -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
+            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p\""
+            " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv ";
+    } else {
+        command += " -filter_complex \"" + internal::build_audio_filter_graph(audio_inputs) +
+                   "\" -map 0:v -map \"[aout]\" -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
+                   "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p\""
+                   " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv"
+                   " -c:a aac -b:a 192k -t " +
+                   format_ms_as_seconds(p.duration_ms) + " ";
+    }
+    command += internal::shell_quote(out_path);
 
     ScopedSigpipeIgnore sigpipe_guard;
     std::unique_ptr<std::FILE, PipeCloser> pipe(popen(command.c_str(), "w"));

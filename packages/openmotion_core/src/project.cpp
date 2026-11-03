@@ -47,6 +47,7 @@ std::optional<LayerType> layer_type_from_string(const std::string& text) {
     if (text == "text") return LayerType::Text;
     if (text == "video") return LayerType::Video;
     if (text == "image") return LayerType::Image;
+    if (text == "audio") return LayerType::Audio;
     return std::nullopt;
 }
 
@@ -57,6 +58,7 @@ std::string layer_type_to_string(LayerType type) {
         case LayerType::Text: return "text";
         case LayerType::Video: return "video";
         case LayerType::Image: return "image";
+        case LayerType::Audio: return "audio";
     }
     return "solid";
 }
@@ -205,6 +207,19 @@ std::variant<Layer, ProjectError> layer_from_json(const json& node, std::size_t 
     layer.source = (node.contains("source") && node["source"].is_string()) ? node["source"].get<std::string>() : "";
     layer.width = number_field(node, "width").value_or(0.0);
     layer.height = number_field(node, "height").value_or(0.0);
+    const double in_ms = number_field(node, "in_ms").value_or(0.0);
+    if (!fits_int64(in_ms)) {
+        return ProjectError{context + ": in_ms is out of range"};
+    }
+    layer.in_ms = static_cast<int64_t>(in_ms);
+    layer.volume = number_field(node, "volume").value_or(1.0);
+
+    if (layer.in_ms < 0) {
+        return ProjectError{context + ": in_ms must not be negative"};
+    }
+    if (!std::isfinite(layer.volume) || layer.volume < 0.0 || layer.volume > 10.0) {
+        return ProjectError{context + ": volume must be between 0 and 10"};
+    }
 
     if (layer.end_ms < layer.start_ms) {
         return ProjectError{context + ": end_ms must not be before start_ms"};
@@ -320,7 +335,7 @@ json transform_to_json(const Transform& transform) {
 }
 
 json layer_to_json(const Layer& layer) {
-    return json{
+    json node{
         {"id", layer.id},
         {"type", layer_type_to_string(layer.type)},
         {"name", layer.name},
@@ -333,6 +348,13 @@ json layer_to_json(const Layer& layer) {
         {"width", layer.width},
         {"height", layer.height},
     };
+    // in_ms/volume only apply to audio layers, so they are written for those and
+    // omitted for every other type to keep the other layers' JSON unchanged.
+    if (layer.type == LayerType::Audio) {
+        node["in_ms"] = layer.in_ms;
+        node["volume"] = layer.volume;
+    }
+    return node;
 }
 
 json project_to_json(const Project& project) {

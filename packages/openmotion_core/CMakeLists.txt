@@ -34,6 +34,7 @@ add_library(openmotion_core STATIC
     src/renderer.cpp
     src/image_loader.cpp
     src/video_stream.cpp
+    src/audio_mix.cpp
     src/keyframe.cpp
     src/compositor.cpp
     src/effects.cpp
@@ -94,7 +95,8 @@ if(BUILD_TESTING)
         tests/test_project.cpp
         tests/test_keyframe.cpp
         tests/test_renderer.cpp
-        tests/test_video_layers.cpp)
+        tests/test_video_layers.cpp
+        tests/test_audio.cpp)
 
     target_link_libraries(openmotion_tests
         PRIVATE
