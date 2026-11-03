@@ -1,126 +1,129 @@
 # 🎬 OpenMotion
 
-> **Free, open-source motion graphics editor — the After Effects alternative that actually runs on Linux.**
+> **Free, open-source motion graphics editor — built to run anywhere, starting with the engine.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-green)]()
 [![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange)]()
-[![Built with Rust](https://img.shields.io/badge/Core-Rust%20🦀-orange)]()
-[![Built with Flutter](https://img.shields.io/badge/UI-Flutter-blue)]()
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)]()
+[![Build](https://img.shields.io/badge/Build-CMake-informational)]()
 
 ---
 
 ## ✨ What is OpenMotion?
 
-OpenMotion is a **cross-platform, GPU-accelerated motion graphics editor** built for creators who refuse proprietary software.
+OpenMotion is a cross-platform motion graphics editor in progress, in the spirit
+of Alight Motion. It is GPL v3 and built around an **open, documented project
+format** (`.omproj`, JSON-based) so your work is never locked inside one app.
 
-Whether you're on Arch Linux at 3am making anime edits, or on Windows trying to escape Adobe's subscription model — OpenMotion is your tool.
-
-Inspired by Alight Motion, powered by Rust and Flutter, licensed under GPL v3.
+**Status: Pre-Alpha.** Only the engine exists so far. There is no UI yet — the
+current way to use it is the `om-render` command-line tool, which turns a
+`.omproj` file into an `.mp4`. Everything below describes what the code in
+`packages/openmotion_core/` does **today**, and nothing more.
 
 ---
 
 ## 🎯 Why OpenMotion?
 
-| Problem | OpenMotion's Answer |
+| Problem | OpenMotion's answer |
 |---|---|
-| After Effects is Windows/Mac only | Runs on Linux, Windows, macOS, Android |
-| Alight Motion is mobile-only | Full desktop experience |
-| Everything good costs money | Free forever. Source available. Always. |
-| Electron apps eat your RAM | Rust core + Flutter UI = lightweight |
-| Closed formats lock your work | Open `.omproj` format (JSON-based) |
-| No preset sharing on Linux | Built-in preset system + AM XML import |
+| Good motion tools are often closed and platform-locked | Open source, and the core engine is plain C++17 + CMake |
+| Closed formats lock your work away | Open, documented `.omproj` format (JSON) |
+| You can't see how it works | The full source is here, under GPL v3 |
+
+The software is free. Selling convenience builds — installers, store listings,
+support — is fine. Hiding how it works is not.
 
 ---
 
-## 🚀 Features (Roadmap)
+## ✅ What works today
 
-### ✅ M1 — Skeleton *(In Progress)*
-- [ ] Flutter desktop shell (Windows / Linux / macOS)
-- [ ] Rust core compiles and links via FFI
-- [ ] Import video file and read metadata via FFmpeg
-- [ ] Black preview canvas renders in UI
+The engine (`packages/openmotion_core/`) currently does:
 
-### 🔲 M2 — Basic Editing
-- [ ] Timeline with clip arrangement
-- [ ] Trim / Split / Move clips
-- [ ] Basic text overlay
-- [ ] Export via FFmpeg
-
-### 🔲 M3 — Motion Graphics Core
-- [ ] Keyframe system with interpolation
-- [ ] Transform animations (position, scale, rotation, opacity)
-- [ ] Easing curves editor
-- [ ] Layer blending modes
-
-### 🔲 M4 — Effects & Presets
-- [ ] Built-in effects library
-- [ ] JSON preset system
-- [ ] **Alight Motion XML preset importer** 👀
-- [ ] Lottie animation support
-
-### 🔲 M5 — Community Launch
-- [ ] AppImage + Windows installer + macOS DMG
-- [ ] Android build on Google Play
-- [ ] Preset sharing marketplace
-- [ ] Full documentation
+- **Project format** — load, validate and save `.omproj` (JSON, format version 1),
+  with `ProjectError` reporting instead of exceptions.
+- **Keyframe evaluation** — constant and animated properties with the easing
+  curves `linear`, `ease_in`, `ease_out`, `ease_in_out` and `hold`, looked up by
+  binary search.
+- **Layers** — `solid`, `rect`, `image` and `video` layers are rendered by a
+  software rasterizer; `audio` layers are mixed into the exported audio.
+- **Images** — decoded through the external `ffmpeg`/`ffprobe` executables, with
+  bilinear filtering in premultiplied alpha and a size cap.
+- **Video** — decoded by streaming raw frames from an `ffmpeg` child process,
+  resampled to the project frame rate; the last frame is held past the clip end.
+- **Audio** — `audio` layers are delayed, gained and mixed with an ffmpeg filter
+  graph, then encoded as AAC (192 kbit/s).
+- **Output** — an MP4 encoded by ffmpeg (the codec is ffmpeg's default for the mp4 muxer), tagged BT.709.
+- **`om-render` CLI** — renders a project to an MP4.
 
 ---
 
-## 🏗️ Architecture
+## 🔲 Not yet
 
-```
-OpenMotion/
-├── packages/
-│   ├── openmotion_core/     # Rust — rendering, keyframes, effects, media I/O
-│   └── openmotion_ui/       # Flutter — timeline, preview, inspector, panels
-├── docs/
-│   ├── REFERENCES.md        # Learning resources for contributors & Jules
-│   └── ARCHITECTURE.md      # Deep dive into system design
-├── tools/
-│   └── preset_converter/    # Alight Motion XML → OpenMotion JSON
-└── LICENSE                  # GPL v3
-```
+These are **not implemented** — listed so the roadmap is honest:
+
+- A graphical UI (timeline, preview, inspector).
+- Text rendering, and Arabic shaping in particular. `text` layers are parsed but
+  not drawn.
+- Effects (the `effects` module is an empty placeholder).
+- Anti-aliasing — the rasterizer uses hard pixel-centre coverage.
+- Rotation-tag (EXIF orientation) support — images are decoded with
+  `-noautorotate`, so a rotation tag is ignored rather than applied.
+- An Alight Motion XML importer (see [`docs/AM_XML_NOTES.md`](docs/AM_XML_NOTES.md)).
+- Audio from video layers — video layers stay muted.
+- Real-time preview / playback.
 
 ---
 
-## 🛠️ Tech Stack
+## 🛠️ Tech stack
 
 | Layer | Technology |
 |---|---|
-| UI | Flutter 3.x (cross-platform) |
-| Core Engine | Rust 🦀 |
-| GPU Rendering | wgpu (Vulkan / Metal / DX12 / OpenGL) |
-| Media Processing | FFmpeg via rust-ffmpeg |
-| Rust ↔ Flutter Bridge | flutter_rust_bridge |
-| Project Format | JSON (`.omproj`) |
+| Language | C++17 |
+| Build | CMake |
+| JSON | [nlohmann/json](https://github.com/nlohmann/json) (fetched by CMake) |
+| Tests | [Catch2 v3](https://github.com/catchorg/Catch2) (fetched by CMake) |
+| Media | External `ffmpeg` and `ffprobe` executables |
 | License | GPL v3 |
 
----
-
-## 📦 Distribution
-
-| Platform | Price | Notes |
-|---|---|---|
-| GitHub Releases | **Free** | Executable + Source — always |
-| Flathub | Pay what you want | Linux first-class citizen |
-| F-Droid | **Free** | FOSS Android store |
-| Microsoft Store | $4.99–$9.99 | Convenience pricing |
-| Steam | $9.99 | Auto-updates + Steam Wallet |
-| Google Play | $1.99–$2.99 | Android mainstream |
-| Itch.io | Pay what you want | Indie community |
-
-> The source code is always free. You pay for convenience — never for the software itself.
+There is **no** Rust, Flutter, wgpu or FFmpeg library linkage. FFmpeg is used
+only by running the `ffmpeg` and `ffprobe` programs as child processes.
 
 ---
 
-## 🐧 Who is this for?
+## 📦 Build and run
 
-- **Linux creators** who are tired of booting Windows just for Alight Motion
-- **Anime editors** who want AMV tools that work natively on their system
-- **FOSS enthusiasts** who have an irrational (but correct) fear of proprietary software
-- **Indie creators** in countries where Adobe CC is not a realistic option
-- **Developers** who want to contribute to a Rust + Flutter open source project
+Requirements:
+
+- A C++17 compiler and CMake (3.16 or newer).
+- `ffmpeg` and `ffprobe` on your `PATH` — needed to load images/video and to
+  export. Builds and the offline tests work without them; tests that need them
+  are skipped.
+- Network access on the first configure, to fetch nlohmann/json and Catch2.
+
+```bash
+cd packages/openmotion_core
+
+# Configure (Debug enables AddressSanitizer + UndefinedBehaviorSanitizer)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+# Build the engine, the om-render CLI and the tests
+cmake --build build
+
+# Run the tests
+ctest --test-dir build
+```
+
+Render the bundled example:
+
+```bash
+./build/om-render examples/hello.omproj hello.mp4
+```
+
+`om-render` takes exactly two arguments, `<input.omproj> <output.mp4>`, and
+resolves relative `source` paths against the directory of the input file.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module map and
+[`docs/OMPROJ_FORMAT.md`](docs/OMPROJ_FORMAT.md) for the project format.
 
 ---
 
@@ -130,18 +133,15 @@ OpenMotion is community-driven from day one.
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/OpenMotion
-cd OpenMotion
-
-# Build Rust core
-cd packages/openmotion_core
-cargo build
-
-# Run Flutter UI
-cd ../openmotion_ui
-flutter run
+cd OpenMotion/packages/openmotion_core
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build
 ```
 
-See [CONTRIBUTING.md](./docs/CONTRIBUTING.md) for full setup guide.
+The Debug build is sanitizer-clean by design (`-fsanitize=address,undefined`),
+and the code is compiled with `-Wall -Wextra -Wpedantic -Werror`, so a warning
+fails the build. Please keep it that way.
 
 ---
 
@@ -149,25 +149,52 @@ See [CONTRIBUTING.md](./docs/CONTRIBUTING.md) for full setup guide.
 
 OpenMotion is licensed under the **GNU General Public License v3.0**.
 
-You are free to use, study, modify, and distribute this software.
-If you distribute a modified version, you must keep it under GPL v3.
+You are free to use, study, modify, and distribute this software. If you
+distribute a modified version, you must keep it under GPL v3.
 
-See [LICENSE](./LICENSE) for full terms.
+See [LICENSE](./LICENSE) for the full terms.
 
 ---
 
-## 💙 Support the Project
+## 💙 Support the project
 
 The software is free. The developer still needs coffee. ☕
 
 - ⭐ Star this repo
 - 🐛 Report bugs and request features via Issues
-- 💸 [GitHub Sponsors](#) | [Ko-fi](#)
 - 📢 Share OpenMotion with your Linux and FOSS communities
 
 ---
 
+## 🗺️ Long-term ideas (not started)
+
+Nothing here is implemented or scheduled. It is a direction, not a promise.
+
+**Possible distribution channels** (all still just ideas):
+
+| Platform | Price idea | Notes |
+|---|---|---|
+| GitHub Releases | Free | Executable + source — always |
+| Flathub | Pay what you want | Linux first-class citizen |
+| F-Droid | Free | FOSS Android store |
+| Microsoft Store | Convenience pricing | Paid convenience build |
+| Steam | Convenience pricing | Auto-updates |
+| Google Play | Convenience pricing | Android mainstream |
+| Itch.io | Pay what you want | Indie community |
+
+> The source code is always free. You would pay for convenience — never for the
+> software itself.
+
+**Rough milestone sketch** (no dates, nothing started):
+
+- **M1 — Engine skeleton.** Software renderer, project format, keyframe
+  evaluation, `om-render` CLI. *(Largely what exists today.)*
+- **M2 — Editing.** Timeline, trim/split/move, basic text overlay.
+- **M3 — Motion graphics core.** Easing-curve editor, layer blending modes.
+- **M4 — Effects and presets.** Built-in effects library, JSON presets, an
+  Alight Motion XML preset importer.
+- **M5 — Community launch.** Packaging for desktop platforms, documentation.
+
 <div align="center">
-  <strong>Made with 🦀 Rust + 💙 Flutter + ☕ Too much coffee</strong><br/>
-  <em>Built by the community, for the community.</em>
+  <strong>Built by the community, for the community.</strong>
 </div>
