@@ -53,7 +53,9 @@ and open video decoders so they are created once and reused across frames.
 
 `render_to_mp4` validates the project, collects and validates audio layers,
 builds the `ffmpeg` command, then writes each rendered frame to the `ffmpeg`
-child's standard input.
+child's standard input. The video is encoded with libx264 (`-preset veryfast
+-crf 18`, `+faststart`) when ffmpeg reports that encoder; otherwise the codec
+arguments are omitted and ffmpeg's default encoder is used.
 
 ### `internal::audio_mix` — the audio filter graph
 

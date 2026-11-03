@@ -26,6 +26,14 @@
 #include "openmotion/media.hpp"
 #include "openmotion/project.hpp"
 
+namespace openmotion::renderer {
+
+// Defined in src/renderer.cpp. Declared here because the public header is not
+// in scope for this task's changes.
+std::string build_video_codec_args(bool have_libx264);
+
+}  // namespace openmotion::renderer
+
 namespace {
 
 namespace project = openmotion::project;
@@ -78,6 +86,16 @@ void pixel(const renderer::Frame& frame, int x, int y, int& red, int& green, int
 
 bool command_available(const std::string& name) {
     const std::string command = "command -v " + name + " > /dev/null 2>&1";
+    return std::system(command.c_str()) == 0;
+}
+
+// True when ffmpeg is installed and lists libx264 among its encoders.
+bool libx264_available() {
+    if (!command_available("ffmpeg")) {
+        return false;
+    }
+    const std::string command =
+        "ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264";
     return std::system(command.c_str()) == 0;
 }
 
@@ -713,4 +731,52 @@ TEST_CASE("the image loader ignores rotation tags", "[renderer]") {
     CHECK(channel(2, 2, 0) < 60);
     CHECK(channel(28, 6, 0) > 150);  // far corner stays red
     CHECK(channel(28, 6, 1) < 60);
+}
+
+TEST_CASE("build_video_codec_args reflects libx264 availability", "[renderer]") {
+    // With libx264 the encoder and quality are pinned explicitly.
+    const std::string with = renderer::build_video_codec_args(true);
+    CHECK(with.find("-c:v libx264") != std::string::npos);
+    CHECK(with.find("-preset veryfast") != std::string::npos);
+    CHECK(with.find("-crf 18") != std::string::npos);
+    CHECK(with.find("-movflags +faststart") != std::string::npos);
+
+    // Without it, nothing is added so ffmpeg keeps its default encoder.
+    CHECK(renderer::build_video_codec_args(false).empty());
+}
+
+TEST_CASE("render_to_mp4 encodes H.264 as yuv420p and keeps the BT.709 tags", "[renderer]") {
+    if (!command_available("ffmpeg") || !command_available("ffprobe") || !libx264_available()) {
+        SKIP("ffmpeg/ffprobe with libx264 are not available");
+    }
+
+    Project project = make_project(16, 16, 10.0, 200);
+    Layer solid = make_layer("bg", LayerType::Solid, 0, 200);
+    solid.color = "#20a040";
+    project.layers.push_back(solid);
+
+    const std::filesystem::path output =
+        std::filesystem::temp_directory_path() /
+        ("openmotion_h264_" + std::to_string(::getpid()) + ".mp4");
+
+    const std::optional<renderer::RenderError> result =
+        renderer::render_to_mp4(project, output.string());
+    REQUIRE_FALSE(result.has_value());
+
+    const std::string probe =
+        "ffprobe -v error -select_streams v:0 "
+        "-show_entries stream=codec_name,pix_fmt,color_space,color_primaries,color_transfer,"
+        "color_range -of default=noprint_wrappers=1 " +
+        openmotion::internal::shell_quote(output.string());
+    const std::string info = capture_command(probe);
+
+    std::error_code ignored;
+    std::filesystem::remove(output, ignored);
+
+    CHECK(info.find("codec_name=h264") != std::string::npos);
+    CHECK(info.find("pix_fmt=yuv420p") != std::string::npos);
+    CHECK(info.find("color_space=bt709") != std::string::npos);
+    CHECK(info.find("color_primaries=bt709") != std::string::npos);
+    CHECK(info.find("color_transfer=bt709") != std::string::npos);
+    CHECK(info.find("color_range=tv") != std::string::npos);
 }

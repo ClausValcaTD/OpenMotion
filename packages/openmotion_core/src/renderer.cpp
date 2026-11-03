@@ -410,7 +410,32 @@ std::string format_ms_as_seconds(int64_t value) {
     return internal::format_fixed(static_cast<double>(value) / 1000.0, 3);
 }
 
+// Asks the installed ffmpeg whether it can encode with libx264. Any failure
+// (ffmpeg missing, non-zero exit, no match) simply reports "not available".
+bool detect_libx264() {
+    const std::optional<std::string> output =
+        run_command("ffmpeg -hide_banner -encoders 2>/dev/null");
+    return output.has_value() && output->find("libx264") != std::string::npos;
+}
+
+// Detection runs at most once per process; the result is cached.
+bool have_libx264() {
+    static const bool detected = detect_libx264();
+    return detected;
+}
+
 }  // namespace
+
+std::string build_video_codec_args(bool have_libx264) {
+    // With libx264 available, pin the encoder and quality explicitly. Without
+    // it, add nothing and let ffmpeg pick its default encoder, exactly as the
+    // renderer did before. The fragment is space-delimited so it splices
+    // cleanly between the other arguments and the output path.
+    if (have_libx264) {
+        return " -c:v libx264 -preset veryfast -crf 18 -movflags +faststart ";
+    }
+    return "";
+}
 
 std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t t_ms) {
     RenderCache cache;
@@ -607,6 +632,7 @@ std::optional<RenderError> render_to_mp4(const project::Project& p, const std::s
                    " -c:a aac -b:a 192k -t " +
                    format_ms_as_seconds(p.duration_ms) + " ";
     }
+    command += build_video_codec_args(have_libx264());
     command += internal::shell_quote(out_path);
 
     ScopedSigpipeIgnore sigpipe_guard;
