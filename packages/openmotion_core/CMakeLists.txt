@@ -66,7 +66,8 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(openmotion_tests
         tests/test_media.cpp
-        tests/test_project.cpp)
+        tests/test_project.cpp
+        tests/test_keyframe.cpp)
 
     target_link_libraries(openmotion_tests
         PRIVATE
