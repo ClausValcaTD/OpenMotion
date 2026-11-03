@@ -41,7 +41,9 @@ add_library(OpenMotion::openmotion_core ALIAS openmotion_core)
 
 target_include_directories(openmotion_core
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(openmotion_core
     PRIVATE
@@ -63,11 +65,33 @@ endif()
 
 include(CTest)
 
+add_executable(om-render
+    tools/om_render.cpp)
+
+target_link_libraries(om-render
+    PRIVATE
+        OpenMotion::openmotion_core)
+
+target_compile_options(om-render
+    PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(om-render
+        PRIVATE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer)
+    target_link_options(om-render
+        PRIVATE
+            -fsanitize=address,undefined)
+endif()
+
 if(BUILD_TESTING)
     add_executable(openmotion_tests
         tests/test_media.cpp
         tests/test_project.cpp
-        tests/test_keyframe.cpp)
+        tests/test_keyframe.cpp
+        tests/test_renderer.cpp)
 
     target_link_libraries(openmotion_tests
         PRIVATE
