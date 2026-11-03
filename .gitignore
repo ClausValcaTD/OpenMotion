@@ -1,0 +1,3 @@
+# CMake build directories
+build/
+packages/openmotion_core/build/
