@@ -27,6 +27,7 @@ std::optional<Easing> easing_from_string(const std::string& text) {
     if (text == "ease_out") return Easing::EaseOut;
     if (text == "ease_in_out") return Easing::EaseInOut;
     if (text == "hold") return Easing::Hold;
+    if (text == "cubic_bezier") return Easing::CubicBezier;
     return std::nullopt;
 }
 
@@ -37,6 +38,7 @@ std::string easing_to_string(Easing easing) {
         case Easing::EaseOut: return "ease_out";
         case Easing::EaseInOut: return "ease_in_out";
         case Easing::Hold: return "hold";
+        case Easing::CubicBezier: return "cubic_bezier";
     }
     return "linear";
 }
@@ -119,6 +121,35 @@ std::variant<Property, ProjectError> property_from_json(const json& node,
                 return ProjectError{context + ": unknown easing '" + entry["easing"].get<std::string>() + "'"};
             }
             keyframe.easing = *easing;
+        }
+
+        // "bezier" is only meaningful for cubic_bezier keyframes; on any other
+        // easing it is ignored (the default control points stay in place).
+        if (keyframe.easing == Easing::CubicBezier) {
+            if (!entry.contains("bezier")) {
+                return ProjectError{context + ": cubic_bezier easing needs a 'bezier' array"};
+            }
+            const json& bezier = entry["bezier"];
+            if (!bezier.is_array() || bezier.size() != 4) {
+                return ProjectError{context + ": 'bezier' must be an array of 4 numbers"};
+            }
+            for (std::size_t i = 0; i < 4; ++i) {
+                if (!bezier[i].is_number()) {
+                    return ProjectError{context + ": 'bezier' must be an array of 4 numbers"};
+                }
+                const double coordinate = bezier[i].get<double>();
+                if (!std::isfinite(coordinate)) {
+                    return ProjectError{context + ": 'bezier' values must be finite"};
+                }
+                keyframe.bezier[i] = coordinate;
+            }
+            if (keyframe.bezier[0] < 0.0 || keyframe.bezier[0] > 1.0 ||
+                keyframe.bezier[2] < 0.0 || keyframe.bezier[2] > 1.0) {
+                return ProjectError{context + ": 'bezier' x1 and x2 must be within [0, 1]"};
+            }
+            if (std::abs(keyframe.bezier[1]) > 10.0 || std::abs(keyframe.bezier[3]) > 10.0) {
+                return ProjectError{context + ": 'bezier' y1 and y2 must be within [-10, 10]"};
+            }
         }
 
         if (!property.keyframes.empty() && keyframe.time_ms < property.keyframes.back().time_ms) {
@@ -314,11 +345,17 @@ json property_to_json(const Property& property) {
     }
     json keyframes = json::array();
     for (const Keyframe& keyframe : property.keyframes) {
-        keyframes.push_back(json{
+        json entry{
             {"t", keyframe.time_ms},
             {"v", keyframe.value},
             {"easing", easing_to_string(keyframe.easing)},
-        });
+        };
+        // Only cubic_bezier keyframes carry control points, so every other
+        // easing keeps serializing byte-identically to before.
+        if (keyframe.easing == Easing::CubicBezier) {
+            entry["bezier"] = keyframe.bezier;
+        }
+        keyframes.push_back(std::move(entry));
     }
     return json{{"keyframes", keyframes}};
 }

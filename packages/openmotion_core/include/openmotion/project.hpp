@@ -2,6 +2,7 @@
 #ifndef OPENMOTION_PROJECT_HPP
 #define OPENMOTION_PROJECT_HPP
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -10,12 +11,16 @@
 
 namespace openmotion::project {
 
-enum class Easing { Linear, EaseIn, EaseOut, EaseInOut, Hold };
+// CubicBezier is appended last so existing enumerator values never change.
+enum class Easing { Linear, EaseIn, EaseOut, EaseInOut, Hold, CubicBezier };
 
 struct Keyframe {
     int64_t time_ms;
     double  value;
     Easing  easing;
+    // CSS cubic-bezier() control points, in the same order (x1, y1, x2, y2).
+    // Only meaningful when easing == CubicBezier; ignored otherwise.
+    std::array<double, 4> bezier = {0.0, 0.0, 1.0, 1.0};
 };
 
 // A property is either a constant or an animated track.

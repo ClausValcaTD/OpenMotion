@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -31,6 +32,7 @@ bool properties_equal(const Property& lhs, const Property& rhs) {
         const Keyframe& a = lhs.keyframes[i];
         const Keyframe& b = rhs.keyframes[i];
         if (a.time_ms != b.time_ms || a.value != b.value || a.easing != b.easing) return false;
+        if (a.easing == Easing::CubicBezier && a.bezier != b.bezier) return false;
     }
     return true;
 }
@@ -83,6 +85,25 @@ std::string with_replaced(std::string text, const std::string& from, const std::
 
 bool is_error(const std::variant<Project, ProjectError>& result) {
     return std::holds_alternative<ProjectError>(result);
+}
+
+std::size_t count_occurrences(const std::string& haystack, const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t position = haystack.find(needle); position != std::string::npos;
+         position = haystack.find(needle, position + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+Keyframe make_bezier_keyframe(int64_t time_ms, double value, double x1, double y1, double x2, double y2) {
+    Keyframe keyframe{time_ms, value, Easing::CubicBezier};
+    keyframe.bezier = {x1, y1, x2, y2};
+    return keyframe;
+}
+
+Keyframe make_keyframe(int64_t time_ms, double value, Easing easing) {
+    return Keyframe{time_ms, value, easing};
 }
 
 }  // namespace
@@ -323,4 +344,246 @@ TEST_CASE("audio layer validation rejects invalid values", "[project]") {
     SECTION("volume far out of range") {
         CHECK(is_error(project::load_from_string(with_replaced(base, "\"volume\": 1.0", "\"volume\": 1e300"))));
     }
+}
+
+TEST_CASE("cubic_bezier easing JSON round trips", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "rect", "start_ms": 0, "end_ms": 1000,
+          "transform": { "x": { "keyframes": [
+            { "t": 0, "v": 0.0, "easing": "cubic_bezier", "bezier": [0.42, 0.0, 0.58, 1.0] },
+            { "t": 1000, "v": 100.0, "easing": "linear" } ] } } }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const Project& project_value = std::get<Project>(loaded);
+
+    const Property& x = project_value.layers[0].transform.x;
+    REQUIRE(x.keyframes.size() == 2);
+    CHECK(x.keyframes[0].easing == Easing::CubicBezier);
+    CHECK(x.keyframes[0].bezier[0] == 0.42);
+    CHECK(x.keyframes[0].bezier[1] == 0.0);
+    CHECK(x.keyframes[0].bezier[2] == 0.58);
+    CHECK(x.keyframes[0].bezier[3] == 1.0);
+
+    const std::string encoded = project::to_json_string(project_value);
+    const std::variant<Project, ProjectError> reloaded = project::load_from_string(encoded);
+    REQUIRE(std::holds_alternative<Project>(reloaded));
+    CHECK(projects_equal(project_value, std::get<Project>(reloaded)));
+
+    // "bezier" is emitted for the cubic_bezier keyframe and nowhere else.
+    const std::string expected_bezier =
+        "            {\n"
+        "              \"bezier\": [\n"
+        "                0.42,\n"
+        "                0.0,\n"
+        "                0.58,\n"
+        "                1.0\n"
+        "              ],\n"
+        "              \"easing\": \"cubic_bezier\",\n"
+        "              \"t\": 0,\n"
+        "              \"v\": 0.0\n"
+        "            }";
+    CHECK(encoded.find(expected_bezier) != std::string::npos);
+    CHECK(encoded.find("\"cubic_bezier\"") != std::string::npos);
+    CHECK(encoded.find("\"easing\": \"linear\"") != std::string::npos);
+    // Exactly one keyframe carries control points.
+    CHECK(count_occurrences(encoded, "\"bezier\": [") == 1);
+}
+
+TEST_CASE("other easings serialize without a bezier field", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "rect", "start_ms": 0, "end_ms": 1000,
+          "transform": { "x": { "keyframes": [
+            { "t": 0, "v": 0.0, "easing": "ease_in" },
+            { "t": 500, "v": 1.0, "easing": "ease_out" },
+            { "t": 1000, "v": 2.0, "easing": "hold" } ] } } }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+
+    CHECK(encoded.find("bezier") == std::string::npos);
+    // The serialized keyframe objects are exactly as before this change.
+    CHECK(encoded.find(R"(            {
+              "easing": "ease_in",
+              "t": 0,
+              "v": 0.0
+            })") != std::string::npos);
+    CHECK(encoded.find(R"(            {
+              "easing": "ease_out",
+              "t": 500,
+              "v": 1.0
+            })") != std::string::npos);
+    CHECK(encoded.find(R"(            {
+              "easing": "hold",
+              "t": 1000,
+              "v": 2.0
+            })") != std::string::npos);
+}
+
+TEST_CASE("bezier control points on a non-cubic_bezier keyframe are ignored", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "rect", "start_ms": 0, "end_ms": 1000,
+          "transform": { "x": { "keyframes": [
+            { "t": 0, "v": 0.0, "easing": "ease_in", "bezier": [0.1, 0.2, 0.3, 0.4] } ] } } }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const Keyframe& keyframe = std::get<Project>(loaded).layers[0].transform.x.keyframes[0];
+    CHECK(keyframe.easing == Easing::EaseIn);
+    // The default control points survive; the stray "bezier" is not read.
+    CHECK(keyframe.bezier == std::array<double, 4>{0.0, 0.0, 1.0, 1.0});
+}
+
+TEST_CASE("cubic_bezier validation rejects invalid bezier fields", "[project]") {
+    const std::string prefix = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "a", "type": "rect", "start_ms": 0, "end_ms": 0,
+          "transform": { "x": { "keyframes": [ )";
+    const std::string suffix = R"( ] } } }
+      ]
+    })";
+
+    auto with_keyframe = [&](const std::string& keyframe) {
+        return prefix + keyframe + suffix;
+    };
+
+    SECTION("missing bezier") {
+        CHECK(is_error(project::load_from_string(
+            with_keyframe(R"({ "t": 0, "v": 1, "easing": "cubic_bezier" })"))));
+    }
+
+    SECTION("bezier is not an array") {
+        CHECK(is_error(project::load_from_string(
+            with_keyframe(R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": 1 })"))));
+    }
+
+    SECTION("bezier has the wrong length") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 0.0, 1.0] })"))));
+    }
+
+    SECTION("bezier contains a non-number") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 0.0, 1.0, "x"] })"))));
+    }
+
+    SECTION("bezier contains a non-finite value") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 0.0, 1.0, 1e400] })"))));
+    }
+
+    SECTION("x1 below zero") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [-0.1, 0.0, 1.0, 1.0] })"))));
+    }
+
+    SECTION("x1 above one") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [1.1, 0.0, 1.0, 1.0] })"))));
+    }
+
+    SECTION("x2 below zero") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 0.0, -0.5, 1.0] })"))));
+    }
+
+    SECTION("x2 above one") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 0.0, 1.5, 1.0] })"))));
+    }
+
+    SECTION("y1 far out of range") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 11.0, 1.0, 1.0] })"))));
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, -10.5, 1.0, 1.0] })"))));
+    }
+
+    SECTION("y2 far out of range") {
+        CHECK(is_error(project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.0, 0.0, 1.0, 10.5] })"))));
+    }
+
+    SECTION("overshooting y within the limit is accepted") {
+        const std::variant<Project, ProjectError> result = project::load_from_string(with_keyframe(
+            R"({ "t": 0, "v": 1, "easing": "cubic_bezier", "bezier": [0.25, -1.5, 0.75, 1.5] })"));
+        REQUIRE(std::holds_alternative<Project>(result));
+        const Keyframe& keyframe = std::get<Project>(result).layers[0].transform.x.keyframes[0];
+        CHECK(keyframe.bezier[1] == -1.5);
+        CHECK(keyframe.bezier[3] == 1.5);
+    }
+}
+
+TEST_CASE("cubic_bezier keyframe round trips through save_to_file", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "a", "type": "rect", "start_ms": 0, "end_ms": 1000,
+          "transform": { "opacity": { "keyframes": [
+            { "t": 0, "v": 0.0, "easing": "cubic_bezier", "bezier": [0.9, 0.1, 1.0, 0.5] },
+            { "t": 1000, "v": 1.0, "easing": "linear" } ] } } }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const Project original = std::get<Project>(loaded);
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        ("omproj_bezier_" + std::to_string(::getpid()) + ".omproj");
+
+    CHECK_FALSE(project::save_to_file(original, path.string()).has_value());
+
+    const std::variant<Project, ProjectError> reloaded = project::load_from_file(path.string());
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+
+    REQUIRE(std::holds_alternative<Project>(reloaded));
+    CHECK(projects_equal(original, std::get<Project>(reloaded)));
+}
+
+TEST_CASE("a hand-built cubic_bezier project serializes and reloads", "[project]") {
+    Project project;
+    project.version = 1;
+    project.name = "Bezier";
+    project.width = 10;
+    project.height = 10;
+    project.fps = 1.0;
+    project.duration_ms = 1000;
+
+    Layer layer;
+    layer.id = "a";
+    layer.type = LayerType::Rect;
+    layer.start_ms = 0;
+    layer.end_ms = 1000;
+    layer.transform = Transform{};
+    layer.transform.scale_x.constant = 1.0;
+    layer.transform.scale_y.constant = 1.0;
+    layer.transform.opacity.constant = 1.0;
+    layer.transform.x.keyframes = {make_bezier_keyframe(0, 0.0, 0.42, 0.0, 0.58, 1.0),
+                                   make_keyframe(1000, 100.0, Easing::Linear)};
+    project.layers.push_back(layer);
+
+    const std::string encoded = project::to_json_string(project);
+    CHECK(encoded.find("\"cubic_bezier\"") != std::string::npos);
+    CHECK(encoded.find("bezier") != std::string::npos);
+
+    const std::variant<Project, ProjectError> reloaded = project::load_from_string(encoded);
+    REQUIRE(std::holds_alternative<Project>(reloaded));
+    CHECK(projects_equal(project, std::get<Project>(reloaded)));
 }
