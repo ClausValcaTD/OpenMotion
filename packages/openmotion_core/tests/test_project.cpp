@@ -693,3 +693,100 @@ TEST_CASE("a blend mode leaves the rest of the layer JSON unchanged", "[project]
     REQUIRE(std::holds_alternative<Project>(plain));
     CHECK(project::to_json_string(std::get<Project>(plain)).find("blend") == std::string::npos);
 }
+
+TEST_CASE("circle and round_rect layers round trip through JSON", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "c", "type": "circle", "start_ms": 0, "end_ms": 0,
+          "color": "#112233", "width": 40.0, "height": 30.0 },
+        { "id": "r", "type": "round_rect", "start_ms": 0, "end_ms": 0,
+          "color": "#445566", "width": 50.0, "height": 20.0, "radius": 8.0 }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const Project& parsed = std::get<Project>(loaded);
+    CHECK(parsed.layers[0].type == LayerType::Circle);
+    CHECK(parsed.layers[0].width == 40.0);
+    CHECK(parsed.layers[0].height == 30.0);
+    CHECK(parsed.layers[0].radius == 0.0);
+    CHECK(parsed.layers[1].type == LayerType::RoundRect);
+    CHECK(parsed.layers[1].radius == 8.0);
+
+    const std::variant<Project, ProjectError> reloaded =
+        project::load_from_string(project::to_json_string(parsed));
+    REQUIRE(std::holds_alternative<Project>(reloaded));
+    CHECK(projects_equal(parsed, std::get<Project>(reloaded)));
+}
+
+TEST_CASE("radius is serialized only for round_rect layers", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "c", "type": "circle", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0 },
+        { "id": "r", "type": "round_rect", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0, "radius": 4.0 }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+
+    // Only the round_rect layer contributes a "radius" key.
+    CHECK(count_occurrences(encoded, "\"radius\"") == 1);
+    CHECK(encoded.find("\"radius\": 4.0") != std::string::npos);
+}
+
+TEST_CASE("round_rect radius defaults to zero when absent", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "round_rect", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0 }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    CHECK(std::get<Project>(loaded).layers[0].radius == 0.0);
+}
+
+TEST_CASE("an invalid radius is a ProjectError", "[project]") {
+    const std::string prefix = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "round_rect", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0, "radius": )";
+    const std::string suffix = R"( }
+      ]
+    })";
+
+    SECTION("negative") {
+        CHECK(is_error(project::load_from_string(prefix + "-1.0" + suffix)));
+    }
+    SECTION("1e400 overflows to infinity") {
+        CHECK(is_error(project::load_from_string(prefix + "1e400" + suffix)));
+    }
+    SECTION("NaN literal is not valid JSON") {
+        CHECK(is_error(project::load_from_string(prefix + "NaN" + suffix)));
+    }
+}
+
+TEST_CASE("a circle layer never serializes a radius", "[project]") {
+    // "radius" is written only for round_rect layers, so a circle's JSON has no
+    // such key.
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "c", "type": "circle", "start_ms": 0, "end_ms": 0,
+          "color": "#000000", "width": 5.0, "height": 5.0 }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+    CHECK(encoded.find("\"type\": \"circle\"") != std::string::npos);
+    CHECK(encoded.find("radius") == std::string::npos);
+}

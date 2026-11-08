@@ -44,12 +44,19 @@ evaluates all six transform properties, and `is_layer_active` tests the
 
 `include/openmotion/renderer.hpp` and `src/renderer.cpp`. `render_frame`
 rasterizes one frame into an opaque black RGBA canvas, drawing layers bottom to
-top. It supports `solid`, `rect`, `image` and `video` layers; `audio` layers are
-skipped (they are mixed during export), and `text` layers are skipped. Image and
-video layers share one geometry path: a rotated, scaled quad is rasterized by
-testing each pixel centre against the transformed rectangle, with bilinear
-sampling in premultiplied alpha for textures. `RenderCache` holds decoded images
-and open video decoders so they are created once and reused across frames.
+top. It supports `solid`, `rect`, `circle`, `round_rect`, `image` and `video`
+layers; `audio` layers are skipped (they are mixed during export), and `text`
+layers are skipped. Image and video layers share one geometry path: a rotated,
+scaled quad is rasterized by testing each pixel centre against the transformed
+rectangle, with bilinear sampling in premultiplied alpha for textures. The shape
+types share a single `draw_shape` helper: `for_each_quad_pixel` visits the
+pixels near the transformed box and hands each a local coordinate plus the half
+extents, and a coverage function turns those into an anti-aliased coverage —
+axis-aligned box coverage for `rect`, the gradient-normalised ellipse distance
+for `circle`, and the rounded-box distance for `round_rect` (`radius` scaled by
+the smaller axis and clamped to half the shorter side). `RenderCache` holds
+decoded images and open video decoders so they are created once and reused
+across frames.
 
 Every drawn pixel is composited with its layer's `blend` mode (see
 `internal::blend` below): the effective alpha is `opacity * coverage * texture
@@ -137,7 +144,8 @@ Project model  ──►  keyframe::evaluate_transform / is_layer_active
    │
    ▼
 renderer::render_frame  (software rasterizer, per frame)
-   │   ├── solid / rect: colour fill and rotated quad
+   │   ├── solid: full-canvas colour fill
+   │   ├── rect / circle / round_rect: anti-aliased shapes in a rotated quad
    │   ├── image: image_loader::load_image  (ffprobe + ffmpeg, cached)
    │   └── video: video_stream::VideoStream (long-lived ffmpeg, cached)
    ▼
@@ -208,9 +216,10 @@ frame-index/advance planning — is tested without any external tools.
   so a seek lands at or just before the target frame's presentation time. Seeks
   at or past the container duration are clamped to the last frame that can still
   be produced.
-- **Analytic edge coverage.** Quad edges use an analytic coverage estimate (no
+- **Analytic edge coverage.** Edges use an analytic coverage estimate (no
   supersampling, no per-pixel allocation), so rotated and scaled edges are
-  anti-aliased. Textures are bilinearly filtered.
+  anti-aliased: box coverage for `rect`/`image`/`video`, and a signed-distance
+  coverage for `circle` and `round_rect`. Textures are bilinearly filtered.
 - **Video layers are silent.** The video decode runs with `-an`; audio comes only
   from `audio` layers.
 - **No UI or preview.** The only entry point is the `om-render` CLI; there is no

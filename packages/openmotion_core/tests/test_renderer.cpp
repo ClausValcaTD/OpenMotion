@@ -1125,3 +1125,348 @@ TEST_CASE("a Normal-mode frame is byte-identical with the blend field omitted", 
     const renderer::Frame& frame_b = rendered(std::get<Project>(b), 0);
     CHECK(frame_a.rgba == frame_b.rgba);
 }
+
+// Sums the red channel over the whole frame, in units of full-white pixels.
+// With a white shape on a black canvas this is the shape's covered area.
+double covered_area(const renderer::Frame& frame) {
+    double total = 0.0;
+    for (std::size_t i = 0; i < frame.rgba.size(); i += 4) {
+        total += static_cast<double>(frame.rgba[i]) / 255.0;
+    }
+    return total;
+}
+
+TEST_CASE("a circle fills its centre, leaves its box corner, and covers pi r^2", "[renderer]") {
+    Project project = make_project(160, 160, 30.0, 1000);
+    Layer circle = make_layer("c", LayerType::Circle, 0, 1000);
+    circle.color = "#ffffff";
+    circle.width = 100.0;  // radius 50
+    circle.height = 100.0;
+    circle.transform.x.constant = 80.0;
+    circle.transform.y.constant = 80.0;
+    project.layers.push_back(circle);
+
+    const renderer::Frame& frame = rendered(project, 0);
+    int red = 0, green = 0, blue = 0;
+
+    pixel(frame, 80, 80, red, green, blue);
+    CHECK(red == 255);  // centre is fully inside
+
+    // The bounding-box corner (30,30) is far outside the inscribed circle.
+    pixel(frame, 30, 30, red, green, blue);
+    CHECK(red == 0);
+
+    const double area = covered_area(frame);
+    const double expected = 3.14159265358979323846 * 50.0 * 50.0;
+    CHECK(area == Catch::Approx(expected).epsilon(0.01));
+}
+
+TEST_CASE("an ellipse matches its width x height box", "[renderer]") {
+    Project project = make_project(160, 160, 30.0, 1000);
+    Layer ellipse = make_layer("e", LayerType::Circle, 0, 1000);
+    ellipse.color = "#ffffff";
+    ellipse.width = 80.0;  // hx = 40
+    ellipse.height = 40.0; // hy = 20
+    ellipse.transform.x.constant = 80.0;
+    ellipse.transform.y.constant = 80.0;
+    project.layers.push_back(ellipse);
+
+    const renderer::Frame& frame = rendered(project, 0);
+    int red = 0, green = 0, blue = 0;
+
+    pixel(frame, 80, 80, red, green, blue);
+    CHECK(red == 255);
+
+    pixel(frame, 118, 80, red, green, blue);  // local_x = 38.5, well inside
+    CHECK(red == 255);
+    pixel(frame, 121, 80, red, green, blue);  // local_x = 41.5 > 40
+    CHECK(red == 0);
+
+    pixel(frame, 80, 98, red, green, blue);   // local_y = 18.5, well inside
+    CHECK(red == 255);
+    pixel(frame, 80, 101, red, green, blue);  // local_y = 21.5 > 20
+    CHECK(red == 0);
+}
+
+TEST_CASE("a round_rect with radius 0 matches a rect", "[renderer]") {
+    auto build = [](LayerType type) {
+        Project project = make_project(80, 80, 30.0, 1000);
+        Layer layer = make_layer("s", type, 0, 1000);
+        layer.color = "#3a7bd5";
+        layer.width = 20.0;
+        layer.height = 10.0;
+        layer.radius = 0.0;
+        layer.transform.x.constant = 40.0;  // pixel-aligned edges at 30/50 and 35/45
+        layer.transform.y.constant = 40.0;
+        project.layers.push_back(layer);
+        return project;
+    };
+
+    const renderer::Frame& rect = rendered(build(LayerType::Rect), 0);
+    const renderer::Frame& round = rendered(build(LayerType::RoundRect), 0);
+
+    REQUIRE(rect.rgba.size() == round.rgba.size());
+    for (std::size_t i = 0; i < rect.rgba.size(); ++i) {
+        CHECK(std::abs(static_cast<int>(rect.rgba[i]) - static_cast<int>(round.rgba[i])) <= 1);
+    }
+}
+
+TEST_CASE("a round_rect with a half-pixel offset matches a rect away from the corners",
+          "[renderer]") {
+    auto build = [](LayerType type) {
+        Project project = make_project(80, 80, 30.0, 1000);
+        Layer layer = make_layer("s", type, 0, 1000);
+        layer.color = "#ffffff";
+        layer.width = 20.0;
+        layer.height = 20.0;
+        layer.radius = 0.0;
+        layer.transform.x.constant = 40.5;  // edges fall on pixel centres
+        layer.transform.y.constant = 40.5;
+        project.layers.push_back(layer);
+        return project;
+    };
+
+    const renderer::Frame& rect = rendered(build(LayerType::Rect), 0);
+    const renderer::Frame& round = rendered(build(LayerType::RoundRect), 0);
+
+    // Only the corner pixels can differ once the edges are misaligned, so skip
+    // any pixel within 1.5 px of one of the four corners.
+    const double hx = 10.0, hy = 10.0;
+    for (int y = 0; y < 80; ++y) {
+        for (int x = 0; x < 80; ++x) {
+            const double lx = (static_cast<double>(x) + 0.5) - 40.5;
+            const double ly = (static_cast<double>(y) + 0.5) - 40.5;
+            double nearest = std::numeric_limits<double>::infinity();
+            for (double cx : {-hx, hx}) {
+                for (double cy : {-hy, hy}) {
+                    nearest = std::min(nearest, std::hypot(lx - cx, ly - cy));
+                }
+            }
+            if (nearest <= 1.5) {
+                continue;
+            }
+            const std::size_t index =
+                (static_cast<std::size_t>(y) * 80u + static_cast<std::size_t>(x)) * 4;
+            CHECK(std::abs(static_cast<int>(rect.rgba[index]) -
+                           static_cast<int>(round.rgba[index])) <= 1);
+        }
+    }
+}
+
+TEST_CASE("a round_rect with a real radius rounds its corners", "[renderer]") {
+    auto build = [](LayerType type) {
+        Project project = make_project(80, 80, 30.0, 1000);
+        Layer layer = make_layer("s", type, 0, 1000);
+        layer.color = "#ffffff";
+        layer.width = 40.0;
+        layer.height = 40.0;
+        layer.radius = 20.0;
+        layer.transform.x.constant = 40.0;
+        layer.transform.y.constant = 40.0;
+        project.layers.push_back(layer);
+        return project;
+    };
+
+    const renderer::Frame& rect = rendered(build(LayerType::Rect), 0);
+    const renderer::Frame& round = rendered(build(LayerType::RoundRect), 0);
+    int red = 0, green = 0, blue = 0;
+
+    // The box corner is filled by a rect but empty for the rounded one.
+    pixel(rect, 20, 20, red, green, blue);
+    CHECK(red == 255);
+    pixel(round, 20, 20, red, green, blue);
+    CHECK(red == 0);
+
+    // The edge midpoints stay filled.
+    pixel(round, 40, 20, red, green, blue);
+    CHECK(red > 200);
+    pixel(round, 20, 40, red, green, blue);
+    CHECK(red > 200);
+}
+
+TEST_CASE("a huge round_rect radius clamps to a pill", "[renderer]") {
+    Project project = make_project(80, 80, 30.0, 1000);
+    Layer pill = make_layer("p", LayerType::RoundRect, 0, 1000);
+    pill.color = "#ffffff";
+    pill.width = 20.0;
+    pill.height = 20.0;
+    pill.radius = 1.0e9;
+    pill.transform.x.constant = 40.0;
+    pill.transform.y.constant = 40.0;
+    project.layers.push_back(pill);
+
+    const renderer::Frame& frame = rendered(project, 0);
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 40, 40, red, green, blue);
+    CHECK(red == 255);
+    pixel(frame, 20, 20, red, green, blue);  // clamped corner is empty
+    CHECK(red == 0);
+}
+
+TEST_CASE("circle and round_rect scale, rotate and fade", "[renderer]") {
+    SECTION("scale 2 doubles the circle's extent") {
+        auto build = [](double scale) {
+            Project project = make_project(80, 80, 30.0, 1000);
+            Layer circle = make_layer("c", LayerType::Circle, 0, 1000);
+            circle.color = "#ffffff";
+            circle.width = 10.0;  // radius 5
+            circle.height = 10.0;
+            circle.transform.x.constant = 40.0;
+            circle.transform.y.constant = 40.0;
+            circle.transform.scale_x.constant = scale;
+            circle.transform.scale_y.constant = scale;
+            project.layers.push_back(circle);
+            return project;
+        };
+        int red = 0, green = 0, blue = 0;
+        pixel(rendered(build(1.0), 0), 47, 40, red, green, blue);  // 7.5 px out: outside
+        CHECK(red == 0);
+        pixel(rendered(build(2.0), 0), 47, 40, red, green, blue);  // inside the scaled circle
+        CHECK(red == 255);
+    }
+
+    SECTION("a 90-degree rotation swaps a non-square round_rect's extents") {
+        Project project = make_project(80, 80, 30.0, 1000);
+        Layer bar = make_layer("b", LayerType::RoundRect, 0, 1000);
+        bar.color = "#ffffff";
+        bar.width = 40.0;  // hx = 20
+        bar.height = 10.0; // hy = 5
+        bar.radius = 0.0;
+        bar.transform.x.constant = 40.0;
+        bar.transform.y.constant = 40.0;
+        bar.transform.rotation.constant = 90.0;
+        project.layers.push_back(bar);
+
+        int red = 0, green = 0, blue = 0;
+        const renderer::Frame& frame = rendered(project, 0);
+        pixel(frame, 40, 55, red, green, blue);  // now along the long axis
+        CHECK(red == 255);
+        pixel(frame, 55, 40, red, green, blue);  // now along the short axis
+        CHECK(red == 0);
+    }
+
+    SECTION("opacity 0.5 halves the blended value") {
+        Project project = make_project(40, 40, 30.0, 1000);
+        Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+        backdrop.color = "#808080";
+        project.layers.push_back(backdrop);
+
+        Layer circle = make_layer("c", LayerType::Circle, 0, 1000);
+        circle.color = "#808080";
+        circle.blend = project::BlendMode::Multiply;
+        circle.width = 40.0;
+        circle.height = 40.0;
+        circle.transform.x.constant = 20.0;
+        circle.transform.y.constant = 20.0;
+        circle.transform.opacity.constant = 0.5;
+        project.layers.push_back(circle);
+
+        // 0.5 * 128 + 0.5 * (multiply 128,128 = 64) = 96.
+        int red = 0, green = 0, blue = 0;
+        pixel(rendered(project, 0), 20, 20, red, green, blue);
+        CHECK(red == Catch::Approx(96).margin(2));
+    }
+}
+
+TEST_CASE("blend modes apply to circle and round_rect layers", "[renderer][blend]") {
+    SECTION("a circle blends at its centre") {
+        Project project = make_project(40, 40, 30.0, 1000);
+        Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+        backdrop.color = "#808080";
+        project.layers.push_back(backdrop);
+
+        Layer circle = make_layer("c", LayerType::Circle, 0, 1000);
+        circle.color = "#808080";
+        circle.width = 30.0;
+        circle.height = 30.0;
+        circle.transform.x.constant = 20.0;
+        circle.transform.y.constant = 20.0;
+        circle.blend = project::BlendMode::Multiply;
+        project.layers.push_back(circle);
+
+        int red = 0, green = 0, blue = 0;
+        pixel(rendered(project, 0), 20, 20, red, green, blue);
+        CHECK(red == Catch::Approx(64).margin(2));
+
+        project.layers[1].blend = project::BlendMode::Screen;
+        pixel(rendered(project, 0), 20, 20, red, green, blue);
+        CHECK(red == Catch::Approx(192).margin(2));
+    }
+
+    SECTION("a round_rect edge pixel interpolates between backdrop and blend") {
+        Project project = make_project(80, 80, 30.0, 1000);
+        Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+        backdrop.color = "#808080";
+        project.layers.push_back(backdrop);
+
+        Layer box = make_layer("r", LayerType::RoundRect, 0, 1000);
+        box.color = "#808080";
+        box.blend = project::BlendMode::Multiply;
+        box.width = 40.0;
+        box.height = 40.0;
+        box.radius = 8.0;
+        box.transform.x.constant = 40.5;  // left edge lands on a pixel centre
+        box.transform.y.constant = 40.5;
+        project.layers.push_back(box);
+
+        int red = 0, green = 0, blue = 0;
+        const renderer::Frame& frame = rendered(project, 0);
+        pixel(frame, 40, 40, red, green, blue);  // fully covered -> multiply 64
+        CHECK(red == Catch::Approx(64).margin(2));
+
+        pixel(frame, 20, 40, red, green, blue);  // half covered -> ~96
+        CHECK(red > 64);
+        CHECK(red < 128);
+        CHECK(red == Catch::Approx(96).margin(4));
+    }
+}
+
+TEST_CASE("non-finite circle and round_rect geometry never crashes", "[renderer]") {
+    SECTION("NaN width on a circle") {
+        Project project = make_project(16, 16, 30.0, 1000);
+        Layer circle = make_layer("c", LayerType::Circle, 0, 1000);
+        circle.color = "#ffffff";
+        circle.width = std::numeric_limits<double>::quiet_NaN();
+        circle.height = 8.0;
+        circle.transform.x.constant = 8.0;
+        circle.transform.y.constant = 8.0;
+        project.layers.push_back(circle);
+
+        const std::variant<renderer::Frame, renderer::RenderError> result =
+            renderer::render_frame(project, 0);
+        REQUIRE(std::holds_alternative<renderer::Frame>(result));
+        REQUIRE(std::get<renderer::Frame>(result).rgba.size() == 16u * 16u * 4u);
+    }
+
+    SECTION("infinite radius on a round_rect") {
+        Project project = make_project(16, 16, 30.0, 1000);
+        Layer box = make_layer("r", LayerType::RoundRect, 0, 1000);
+        box.color = "#ffffff";
+        box.width = 8.0;
+        box.height = 8.0;
+        box.radius = std::numeric_limits<double>::infinity();
+        box.transform.x.constant = 8.0;
+        box.transform.y.constant = 8.0;
+        project.layers.push_back(box);
+
+        const std::variant<renderer::Frame, renderer::RenderError> result =
+            renderer::render_frame(project, 0);
+        REQUIRE(std::holds_alternative<renderer::Frame>(result));
+        REQUIRE(std::get<renderer::Frame>(result).rgba.size() == 16u * 16u * 4u);
+    }
+
+    SECTION("NaN transform on a circle") {
+        Project project = make_project(16, 16, 30.0, 1000);
+        Layer circle = make_layer("c", LayerType::Circle, 0, 1000);
+        circle.color = "#ffffff";
+        circle.width = 8.0;
+        circle.height = 8.0;
+        circle.transform.x.constant = std::numeric_limits<double>::quiet_NaN();
+        circle.transform.rotation.constant = std::numeric_limits<double>::infinity();
+        project.layers.push_back(circle);
+
+        const std::variant<renderer::Frame, renderer::RenderError> result =
+            renderer::render_frame(project, 0);
+        REQUIRE(std::holds_alternative<renderer::Frame>(result));
+    }
+}
