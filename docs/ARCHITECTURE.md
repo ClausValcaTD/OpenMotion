@@ -51,6 +51,12 @@ testing each pixel centre against the transformed rectangle, with bilinear
 sampling in premultiplied alpha for textures. `RenderCache` holds decoded images
 and open video decoders so they are created once and reused across frames.
 
+Every drawn pixel is composited with its layer's `blend` mode (see
+`internal::blend` below): the effective alpha is `opacity * coverage * texture
+alpha`, and the result is `(1 - a) * cb + a * blend_channel(mode, cb, cs)` per
+channel. `Normal` keeps the original source-over formula, so a project without a
+blend mode renders byte-identically to before the feature existed.
+
 `render_to_mp4` validates the project, collects and validates audio layers,
 builds the `ffmpeg` command, then writes each rendered frame to the `ffmpeg`
 child's standard input. The video is encoded with libx264 (`-preset veryfast
@@ -82,6 +88,16 @@ pure helper `plan_advance` to decide whether to reuse, read the next frame, skip
 a few, or restart the process with a seek. The timing helpers
 (`video_frame_index`, `plan_advance`) contain no I/O and are unit-tested
 directly.
+
+### `internal::blend` — blend-mode math
+
+`src/internal/blend.hpp`. A header-only, pure module: `blend_channel(mode, cb,
+cs)` applies one separable blend function (`Normal`, `Multiply`, `Screen`,
+`Overlay`, `Exclusion`, `ColorBurn`, `LinearDodge`) to a pair of channel values
+in `[0, 1]`, clamps the result to `[0, 1]`, and returns the backdrop for a NaN
+input. It does no I/O and allocates nothing, so it is unit-tested directly
+without `ffmpeg` (see `tests/test_blend.cpp`). The renderer maps each 8-bit
+canvas channel to `[0, 1]`, calls it, and scales back.
 
 ### `internal::shell_quote` — safe command arguments
 
@@ -163,8 +179,9 @@ mixed audio stream.
 
 The tests live in `packages/openmotion_core/tests/`, one file per area:
 `test_project.cpp`, `test_keyframe.cpp`, `test_media.cpp`, `test_renderer.cpp`,
-`test_video_layers.cpp` and `test_audio.cpp`. They are one Catch2 executable
-discovered by CTest, so each `TEST_CASE` runs as its own CTest test.
+`test_blend.cpp`, `test_video_layers.cpp` and `test_audio.cpp`. They are one
+Catch2 executable discovered by CTest, so each `TEST_CASE` runs as its own CTest
+test.
 
 Tests that need the media tools call `command_available("ffmpeg")` /
 `command_available("ffprobe")` first and `SKIP(...)` when the tools are absent,

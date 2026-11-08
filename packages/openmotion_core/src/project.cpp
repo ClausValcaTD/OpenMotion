@@ -43,6 +43,30 @@ std::string easing_to_string(Easing easing) {
     return "linear";
 }
 
+std::optional<BlendMode> blend_mode_from_string(const std::string& text) {
+    if (text == "normal") return BlendMode::Normal;
+    if (text == "multiply") return BlendMode::Multiply;
+    if (text == "screen") return BlendMode::Screen;
+    if (text == "overlay") return BlendMode::Overlay;
+    if (text == "exclusion") return BlendMode::Exclusion;
+    if (text == "color_burn") return BlendMode::ColorBurn;
+    if (text == "linear_dodge") return BlendMode::LinearDodge;
+    return std::nullopt;
+}
+
+std::string blend_mode_to_string(BlendMode mode) {
+    switch (mode) {
+        case BlendMode::Normal: return "normal";
+        case BlendMode::Multiply: return "multiply";
+        case BlendMode::Screen: return "screen";
+        case BlendMode::Overlay: return "overlay";
+        case BlendMode::Exclusion: return "exclusion";
+        case BlendMode::ColorBurn: return "color_burn";
+        case BlendMode::LinearDodge: return "linear_dodge";
+    }
+    return "normal";
+}
+
 std::optional<LayerType> layer_type_from_string(const std::string& text) {
     if (text == "solid") return LayerType::Solid;
     if (text == "rect") return LayerType::Rect;
@@ -256,6 +280,19 @@ std::variant<Layer, ProjectError> layer_from_json(const json& node, std::size_t 
         return ProjectError{context + ": end_ms must not be before start_ms"};
     }
 
+    if (node.contains("blend")) {
+        if (!node["blend"].is_string()) {
+            return ProjectError{context + ": 'blend' must be a string"};
+        }
+        const std::optional<BlendMode> blend =
+            blend_mode_from_string(node["blend"].get<std::string>());
+        if (!blend.has_value()) {
+            return ProjectError{context + ": unknown blend mode '" +
+                                node["blend"].get<std::string>() + "'"};
+        }
+        layer.blend = *blend;
+    }
+
     if (node.contains("transform")) {
         std::variant<Transform, ProjectError> transform = transform_from_json(node["transform"], context + ".transform");
         if (const auto* error = std::get_if<ProjectError>(&transform)) {
@@ -390,6 +427,11 @@ json layer_to_json(const Layer& layer) {
     if (layer.type == LayerType::Audio) {
         node["in_ms"] = layer.in_ms;
         node["volume"] = layer.volume;
+    }
+    // "blend" is written only when it is not the default, so a layer without a
+    // blend mode serializes exactly as it did before the field existed.
+    if (layer.blend != BlendMode::Normal) {
+        node["blend"] = blend_mode_to_string(layer.blend);
     }
     return node;
 }

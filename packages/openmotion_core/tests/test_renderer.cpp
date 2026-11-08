@@ -963,3 +963,165 @@ TEST_CASE("anti-aliasing: non-finite and huge geometry never crashes", "[rendere
     }
 }
 
+TEST_CASE("blend modes combine a layer with the canvas below", "[renderer][blend]") {
+    // A mid-gray (#808080) backdrop, then a same-colour layer on top with a
+    // blend mode. With full coverage and opacity the result is exactly
+    // blend_channel(mode, 128/255, 128/255) * 255.
+    Project project = make_project(4, 4, 30.0, 1000);
+    Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+    backdrop.color = "#808080";
+    project.layers.push_back(backdrop);
+
+    Layer top = make_layer("top", LayerType::Solid, 0, 1000);
+    top.color = "#808080";
+    top.blend = project::BlendMode::Multiply;
+    project.layers.push_back(top);
+
+    int red = 0, green = 0, blue = 0;
+    pixel(rendered(project, 0), 2, 2, red, green, blue);
+    CHECK(red == Catch::Approx(64).margin(2));
+    CHECK(green == Catch::Approx(64).margin(2));
+    CHECK(blue == Catch::Approx(64).margin(2));
+
+    project.layers[1].blend = project::BlendMode::Screen;
+    pixel(rendered(project, 0), 2, 2, red, green, blue);
+    CHECK(red == Catch::Approx(192).margin(2));
+    CHECK(green == Catch::Approx(192).margin(2));
+    CHECK(blue == Catch::Approx(192).margin(2));
+}
+
+TEST_CASE("blend modes with opacity 0.5 interpolate toward the backdrop", "[renderer][blend]") {
+    Project project = make_project(4, 4, 30.0, 1000);
+    Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+    backdrop.color = "#808080";
+    project.layers.push_back(backdrop);
+
+    Layer top = make_layer("top", LayerType::Solid, 0, 1000);
+    top.color = "#808080";
+    top.blend = project::BlendMode::Multiply;
+    top.transform.opacity.constant = 0.5;
+    project.layers.push_back(top);
+
+    // result = 0.5 * backdrop + 0.5 * multiply = 0.5 * 128 + 0.5 * 64 = 96.
+    int red = 0, green = 0, blue = 0;
+    pixel(rendered(project, 0), 2, 2, red, green, blue);
+    CHECK(red == Catch::Approx(96).margin(2));
+    CHECK(green == Catch::Approx(96).margin(2));
+    CHECK(blue == Catch::Approx(96).margin(2));
+}
+
+TEST_CASE("a blend mode interpolates across an anti-aliased edge", "[renderer][blend]") {
+    Project project = make_project(24, 24, 30.0, 1000);
+    Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+    backdrop.color = "#808080";
+    project.layers.push_back(backdrop);
+
+    Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+    rect.color = "#808080";
+    rect.blend = project::BlendMode::Multiply;
+    rect.width = 4.0;  // left edge at 12.5 - 2.0 = 10.5
+    rect.height = 10.0;
+    rect.transform.x.constant = 12.5;
+    rect.transform.y.constant = 12.0;
+    project.layers.push_back(rect);
+
+    const renderer::Frame& frame = rendered(project, 0);
+    int red = 0, green = 0, blue = 0;
+
+    pixel(frame, 12, 12, red, green, blue);  // fully covered -> multiply 64
+    CHECK(red == Catch::Approx(64).margin(2));
+
+    pixel(frame, 10, 12, red, green, blue);  // half covered -> 0.5 * 128 + 0.5 * 64 = 96
+    CHECK(red == Catch::Approx(96).margin(2));
+
+    pixel(frame, 9, 12, red, green, blue);  // outside the rect -> untouched backdrop
+    CHECK(red == Catch::Approx(128).margin(2));
+}
+
+TEST_CASE("layer order decides what a blend mode sees", "[renderer][blend]") {
+    // Top is drawn after bottom, so only the second layer blends.
+    Project project = make_project(4, 4, 30.0, 1000);
+    Layer first = make_layer("a", LayerType::Solid, 0, 1000);
+    first.color = "#808080";
+    first.blend = project::BlendMode::Multiply;  // blends with the black canvas -> black
+    project.layers.push_back(first);
+
+    Layer second = make_layer("b", LayerType::Solid, 0, 1000);
+    second.color = "#808080";
+    second.blend = project::BlendMode::Screen;  // blends with black -> #808080
+    project.layers.push_back(second);
+
+    int red = 0, green = 0, blue = 0;
+    pixel(rendered(project, 0), 2, 2, red, green, blue);
+    // multiply over black = 0, then screen over black = 0 + 128 - 0 = 128.
+    CHECK(red == Catch::Approx(128).margin(2));
+    CHECK(green == Catch::Approx(128).margin(2));
+    CHECK(blue == Catch::Approx(128).margin(2));
+
+    // Swapping the order changes the result: screen over black = 128, then
+    // multiply over 128 = 128 * 128 / 255 ~= 64.
+    std::swap(project.layers[0], project.layers[1]);
+    pixel(rendered(project, 0), 2, 2, red, green, blue);
+    CHECK(red == Catch::Approx(64).margin(2));
+}
+
+TEST_CASE("a blend mode applies to an image layer", "[renderer][blend]") {
+    Project project = make_project(8, 8, 30.0, 1000);
+    Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+    backdrop.color = "#808080";
+    project.layers.push_back(backdrop);
+
+    Layer image = make_layer("img", LayerType::Image, 0, 1000);
+    image.source = "gray";
+    image.blend = project::BlendMode::Multiply;
+    image.width = 8.0;   // explicit size keeps the sampled pixel interior
+    image.height = 8.0;
+    image.transform.x.constant = 4.0;
+    image.transform.y.constant = 4.0;
+    project.layers.push_back(image);
+
+    // A uniform #808080 texture: multiply over the #808080 canvas -> ~64.
+    const std::vector<uint8_t> gray = {128, 128, 128, 255};
+    const renderer::Frame& frame =
+        rendered_with_image(project, 0, "gray", make_texture(1, 1, gray));
+
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 4, 4, red, green, blue);
+    CHECK(red == Catch::Approx(64).margin(2));
+    CHECK(green == Catch::Approx(64).margin(2));
+    CHECK(blue == Catch::Approx(64).margin(2));
+}
+
+TEST_CASE("a Normal-mode frame is byte-identical with the blend field omitted", "[renderer][blend]") {
+    // The same two-layer project, once with "blend" omitted from every layer
+    // and once with it written explicitly as "normal". The frames must match
+    // byte for byte, which also pins Normal to the pre-blend output.
+    const std::string without = R"({
+      "version": 1, "width": 24, "height": 18, "fps": 30.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "bg", "type": "solid", "start_ms": 0, "end_ms": 1000, "color": "#203040" },
+        { "id": "box", "type": "rect", "start_ms": 0, "end_ms": 1000,
+          "color": "#e04030", "width": 10.0, "height": 8.0,
+          "transform": { "x": 11.5, "y": 9.0, "opacity": 0.6 } }
+      ]
+    })";
+    const std::string with_normal = R"({
+      "version": 1, "width": 24, "height": 18, "fps": 30.0, "duration_ms": 1000,
+      "layers": [
+        { "id": "bg", "type": "solid", "start_ms": 0, "end_ms": 1000, "color": "#203040",
+          "blend": "normal" },
+        { "id": "box", "type": "rect", "start_ms": 0, "end_ms": 1000,
+          "color": "#e04030", "width": 10.0, "height": 8.0, "blend": "normal",
+          "transform": { "x": 11.5, "y": 9.0, "opacity": 0.6 } }
+      ]
+    })";
+
+    const std::variant<Project, project::ProjectError> a = project::load_from_string(without);
+    const std::variant<Project, project::ProjectError> b = project::load_from_string(with_normal);
+    REQUIRE(std::holds_alternative<Project>(a));
+    REQUIRE(std::holds_alternative<Project>(b));
+
+    const renderer::Frame& frame_a = rendered(std::get<Project>(a), 0);
+    const renderer::Frame& frame_b = rendered(std::get<Project>(b), 0);
+    CHECK(frame_a.rgba == frame_b.rgba);
+}

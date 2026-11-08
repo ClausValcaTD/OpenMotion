@@ -52,6 +52,7 @@ Each element of `layers` is an object. Layers are drawn bottom to top, so the
 | `height` | number | no | `0` | As above. |
 | `in_ms` | number | no | `0` | **Audio only.** Offset into the source file. Must be `>= 0`. |
 | `volume` | number | no | `1.0` | **Audio only.** Linear gain, must be finite and within `0`–`10`. |
+| `blend` | string | no | `"normal"` | Blend mode. One of the names below. Ignored by `audio` layers. |
 
 `start_ms` and `end_ms` are converted from numbers with the same range guard as
 the top-level integers.
@@ -70,6 +71,35 @@ the top-level integers.
 For `image` and `video` layers, if both `width` and `height` are greater than
 zero they override the decoded size; otherwise the source's native size is used.
 Transform, colour and size are ignored for `audio` layers.
+
+### Blend modes
+
+`blend` selects how a layer's colour is combined with what is already on the
+canvas below it. It applies to `solid`, `rect`, `image` and `video` layers;
+`audio` layers carry no pixels and ignore it. The canvas is always opaque, so
+for a pixel with effective alpha `a = opacity * coverage * texture alpha` the
+result is
+
+```
+result = (1 - a) * cb + a * blend_channel(mode, cb, cs)
+```
+
+per channel, where `cb` is the backdrop and `cs` the source (both in `[0, 1]`),
+rounded to 8 bits. `normal` (`a = 1`, full coverage) is the original source-over
+result and is byte-for-byte identical to a render with no blend field at all.
+
+| `blend` | Formula for `blend_channel(mode, cb, cs)` |
+|---|---|
+| `normal` | `cs` |
+| `multiply` | `cb * cs` |
+| `screen` | `cb + cs - cb * cs` |
+| `overlay` | `cb <= 0.5 ? 2*cb*cs : 1 - 2*(1-cb)*(1-cs)` |
+| `exclusion` | `cb + cs - 2*cb*cs` |
+| `color_burn` | `cb >= 1 ? 1 : (cs <= 0 ? 0 : 1 - min(1, (1-cb)/cs))` |
+| `linear_dodge` | `min(1, cb + cs)` |
+
+Every result is clamped to `[0, 1]`; a NaN input returns `cb`. An unknown blend
+name is an error.
 
 ### Transform object
 
@@ -151,9 +181,10 @@ Alight Motion exports mostly use this easing (see `docs/AM_XML_NOTES.md`).
 trailing newline. The writer always emits every field of every layer — including
 `name`, `color`, `text`, `source`, `width` and `height` even when empty or zero —
 **except** `in_ms` and `volume`, which are written **only for `audio` layers**
-and omitted for every other type. The transform is always written with all six
-properties; a property is written as a bare number when it has no keyframes, and
-as a `{"keyframes": [...]}` object otherwise.
+and omitted for every other type, and `blend`, which is written **only when it
+is not `normal`** and omitted otherwise. The transform is always written with
+all six properties; a property is written as a bare number when it has no
+keyframes, and as a `{"keyframes": [...]}` object otherwise.
 
 The `bezier` array is written **only** for `cubic_bezier` keyframes. Every other
 easing serializes exactly as before this field existed, so existing files stay
@@ -176,6 +207,7 @@ round trip is stable: loading the saved file yields an equal project.
 - `start_ms`/`end_ms`/`in_ms` must be in range; `in_ms >= 0`.
 - `end_ms >= start_ms`.
 - `volume` must be finite and within `[0, 10]`.
+- `blend`, if present, must be a string naming a known blend mode.
 - A property must be a number or an object with a `keyframes` array.
 - Each keyframe must be an object with numeric `t` and `v`; `t` must be in range.
 - Keyframes must be sorted by `t`.

@@ -95,6 +95,7 @@ if(BUILD_TESTING)
         tests/test_project.cpp
         tests/test_keyframe.cpp
         tests/test_renderer.cpp
+        tests/test_blend.cpp
         tests/test_video_layers.cpp
         tests/test_audio.cpp)
 

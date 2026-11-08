@@ -35,6 +35,11 @@ struct Transform {
 
 enum class LayerType { Solid, Rect, Text, Video, Image, Audio };
 
+// How a layer's colour is combined with what is already on the canvas.
+// Appended in this order so Normal stays 0: a default-constructed layer, and
+// any project that omits "blend", keep the plain source-over result.
+enum class BlendMode { Normal, Multiply, Screen, Overlay, Exclusion, ColorBurn, LinearDodge };
+
 struct Layer {
     std::string id;
     LayerType   type;
@@ -48,6 +53,7 @@ struct Layer {
     double      width = 0, height = 0;  // used by Rect
     int64_t     in_ms = 0;              // source offset, used by Audio
     double      volume = 1.0;           // 0..10, used by Audio
+    BlendMode   blend = BlendMode::Normal;  // ignored by Audio
 };
 
 struct Project {

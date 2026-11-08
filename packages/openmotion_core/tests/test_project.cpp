@@ -587,3 +587,109 @@ TEST_CASE("a hand-built cubic_bezier project serializes and reloads", "[project]
     REQUIRE(std::holds_alternative<Project>(reloaded));
     CHECK(projects_equal(project, std::get<Project>(reloaded)));
 }
+
+TEST_CASE("blend round trips for every mode", "[project]") {
+    const struct {
+        const char* json_name;
+        project::BlendMode mode;
+    } cases[] = {
+        {"normal", project::BlendMode::Normal},
+        {"multiply", project::BlendMode::Multiply},
+        {"screen", project::BlendMode::Screen},
+        {"overlay", project::BlendMode::Overlay},
+        {"exclusion", project::BlendMode::Exclusion},
+        {"color_burn", project::BlendMode::ColorBurn},
+        {"linear_dodge", project::BlendMode::LinearDodge},
+    };
+
+    for (const auto& test : cases) {
+        const std::string text = std::string(R"({
+          "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+          "layers": [
+            { "id": "a", "type": "solid", "start_ms": 0, "end_ms": 0,
+              "color": "#ffffff", "blend": ")" ) + test.json_name + R"(" }
+          ]
+        })";
+
+        const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+        REQUIRE(std::holds_alternative<Project>(loaded));
+        CHECK(std::get<Project>(loaded).layers[0].blend == test.mode);
+
+        const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+        const std::variant<Project, ProjectError> reloaded = project::load_from_string(encoded);
+        REQUIRE(std::holds_alternative<Project>(reloaded));
+        CHECK(std::get<Project>(reloaded).layers[0].blend == test.mode);
+        CHECK(projects_equal(std::get<Project>(loaded), std::get<Project>(reloaded)));
+    }
+}
+
+TEST_CASE("blend is omitted for Normal and written for the others", "[project]") {
+    const std::string base = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "a", "type": "solid", "start_ms": 0, "end_ms": 0, "color": "#ffffff" }
+      ]
+    })";
+
+    // A default-constructed layer is Normal, so no "blend" key is emitted and
+    // the JSON stays byte-identical to a project that never had the field.
+    const std::variant<Project, ProjectError> normal = project::load_from_string(base);
+    REQUIRE(std::holds_alternative<Project>(normal));
+    const std::string encoded_normal = project::to_json_string(std::get<Project>(normal));
+    CHECK(encoded_normal.find("blend") == std::string::npos);
+
+    // The same project with an explicit non-Normal mode does emit the key.
+    const std::variant<Project, ProjectError> multiply = project::load_from_string(
+        with_replaced(base, "\"color\": \"#ffffff\"", "\"color\": \"#ffffff\", \"blend\": \"multiply\""));
+    REQUIRE(std::holds_alternative<Project>(multiply));
+    const std::string encoded_multiply = project::to_json_string(std::get<Project>(multiply));
+    CHECK(encoded_multiply.find("\"blend\": \"multiply\"") != std::string::npos);
+}
+
+TEST_CASE("an unknown blend name is a ProjectError", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "a", "type": "solid", "start_ms": 0, "end_ms": 0, "blend": "glow" }
+      ]
+    })";
+    const std::variant<Project, ProjectError> result = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<ProjectError>(result));
+    CHECK(std::get<ProjectError>(result).message.find("glow") != std::string::npos);
+}
+
+TEST_CASE("a non-string blend value is a ProjectError", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "a", "type": "solid", "start_ms": 0, "end_ms": 0, "blend": 3 }
+      ]
+    })";
+    CHECK(is_error(project::load_from_string(text)));
+}
+
+TEST_CASE("a blend mode leaves the rest of the layer JSON unchanged", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "a", "type": "solid", "start_ms": 0, "end_ms": 0,
+          "color": "#112233", "blend": "screen" }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+
+    // Every other field is emitted exactly as before; only "blend" is new.
+    CHECK(encoded.find(R"("id": "a")") != std::string::npos);
+    CHECK(encoded.find(R"("type": "solid")") != std::string::npos);
+    CHECK(encoded.find(R"("color": "#112233")") != std::string::npos);
+    CHECK(encoded.find(R"("blend": "screen")") != std::string::npos);
+
+    // A Normal layer serializes with no "blend" at all.
+    const std::variant<Project, ProjectError> plain = project::load_from_string(
+        with_replaced(text, ", \"blend\": \"screen\"", ""));
+    REQUIRE(std::holds_alternative<Project>(plain));
+    CHECK(project::to_json_string(std::get<Project>(plain)).find("blend") == std::string::npos);
+}

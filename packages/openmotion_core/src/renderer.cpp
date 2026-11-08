@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include "internal/audio_mix.hpp"
+#include "internal/blend.hpp"
 #include "internal/image_loader.hpp"
 #include "internal/shell_quote.hpp"
 #include "internal/video_stream.hpp"
@@ -84,9 +85,26 @@ double blend_channel(double source, double destination, double alpha) {
     return value;
 }
 
+// One channel (0..255) of a layer pixel blended onto the opaque canvas.
+// `alpha` is the effective coverage (opacity * coverage * texture alpha) and
+// `mode` the layer's blend mode. Normal keeps the original source-over
+// formula byte-for-byte; every other mode mixes the separable blend function
+// in [0,1] and scales back to 0..255.
+double blend_over(double backdrop, double source, double alpha, project::BlendMode mode) {
+    if (mode == project::BlendMode::Normal) {
+        return blend_channel(source, backdrop, alpha);
+    }
+    const double cb = backdrop / 255.0;
+    const double cs = source / 255.0;
+    const double value = ((1.0 - alpha) * cb + alpha * internal::blend_channel(mode, cb, cs)) * 255.0;
+    if (value <= 0.0) return 0.0;
+    if (value >= 255.0) return 255.0;
+    return value;
+}
+
 // Source-over blend of an opaque layer colour onto the opaque canvas.
 void blend_pixel(Frame& frame, int x, int y, uint8_t red, uint8_t green, uint8_t blue,
-                 double alpha) {
+                 double alpha, project::BlendMode mode) {
     if (alpha <= 0.0) return;
     if (x < 0 || y < 0 || x >= frame.width || y >= frame.height) return;
     const std::size_t index =
@@ -94,18 +112,18 @@ void blend_pixel(Frame& frame, int x, int y, uint8_t red, uint8_t green, uint8_t
          static_cast<std::size_t>(x)) *
         4;
     frame.rgba[index + 0] = static_cast<uint8_t>(
-        std::lround(blend_channel(red, frame.rgba[index + 0], alpha)));
+        std::lround(blend_over(frame.rgba[index + 0], red, alpha, mode)));
     frame.rgba[index + 1] = static_cast<uint8_t>(
-        std::lround(blend_channel(green, frame.rgba[index + 1], alpha)));
+        std::lround(blend_over(frame.rgba[index + 1], green, alpha, mode)));
     frame.rgba[index + 2] = static_cast<uint8_t>(
-        std::lround(blend_channel(blue, frame.rgba[index + 2], alpha)));
+        std::lround(blend_over(frame.rgba[index + 2], blue, alpha, mode)));
     frame.rgba[index + 3] = 255;
 }
 
 // Source-over blend of a straight-alpha texture sample (0..255 channels) onto
 // the opaque canvas. `alpha` already folds in the texture alpha and opacity.
 void blend_sample(Frame& frame, int x, int y, double red, double green, double blue,
-                  double alpha) {
+                  double alpha, project::BlendMode mode) {
     if (alpha <= 0.0) return;
     if (x < 0 || y < 0 || x >= frame.width || y >= frame.height) return;
     const std::size_t index =
@@ -113,18 +131,19 @@ void blend_sample(Frame& frame, int x, int y, double red, double green, double b
          static_cast<std::size_t>(x)) *
         4;
     frame.rgba[index + 0] = static_cast<uint8_t>(
-        std::lround(blend_channel(red, frame.rgba[index + 0], alpha)));
+        std::lround(blend_over(frame.rgba[index + 0], red, alpha, mode)));
     frame.rgba[index + 1] = static_cast<uint8_t>(
-        std::lround(blend_channel(green, frame.rgba[index + 1], alpha)));
+        std::lround(blend_over(frame.rgba[index + 1], green, alpha, mode)));
     frame.rgba[index + 2] = static_cast<uint8_t>(
-        std::lround(blend_channel(blue, frame.rgba[index + 2], alpha)));
+        std::lround(blend_over(frame.rgba[index + 2], blue, alpha, mode)));
     frame.rgba[index + 3] = 255;
 }
 
-void draw_solid(Frame& frame, uint8_t red, uint8_t green, uint8_t blue, double alpha) {
+void draw_solid(Frame& frame, uint8_t red, uint8_t green, uint8_t blue, double alpha,
+                project::BlendMode mode) {
     for (int y = 0; y < frame.height; ++y) {
         for (int x = 0; x < frame.width; ++x) {
-            blend_pixel(frame, x, y, red, green, blue, alpha);
+            blend_pixel(frame, x, y, red, green, blue, alpha, mode);
         }
     }
 }
@@ -220,11 +239,11 @@ void for_each_quad_pixel(const Quad& quad, Fn&& visit) {
 
 void draw_rect(Frame& frame, double center_x, double center_y, double width, double height,
                double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
-               uint8_t blue, double alpha) {
+               uint8_t blue, double alpha, project::BlendMode mode) {
     const Quad quad =
         make_quad(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg);
     for_each_quad_pixel(quad, [&](int x, int y, double, double, double coverage) {
-        blend_pixel(frame, x, y, red, green, blue, alpha * coverage);
+        blend_pixel(frame, x, y, red, green, blue, alpha * coverage, mode);
     });
 }
 
@@ -321,7 +340,7 @@ Sample sample_bilinear(const Texture& texture, double tx, double ty) {
 
 void draw_image(Frame& frame, const Texture& texture, double center_x, double center_y,
                 double width, double height, double scale_x, double scale_y, double rotation_deg,
-                double opacity) {
+                double opacity, project::BlendMode mode) {
     if (texture.width <= 0 || texture.height <= 0) {
         return;
     }
@@ -337,7 +356,7 @@ void draw_image(Frame& frame, const Texture& texture, double center_x, double ce
             sample_bilinear(texture, u * static_cast<double>(texture.width),
                             v * static_cast<double>(texture.height));
         blend_sample(frame, x, y, sample.red, sample.green, sample.blue,
-                     sample.alpha / 255.0 * opacity * coverage);
+                     sample.alpha / 255.0 * opacity * coverage, mode);
     });
 }
 
@@ -505,7 +524,7 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             const double height =
                 layer.width > 0.0 && layer.height > 0.0 ? layer.height : texture->height;
             draw_image(frame, *texture, transform.x, transform.y, width, height, transform.scale_x,
-                       transform.scale_y, transform.rotation, alpha);
+                       transform.scale_y, transform.rotation, alpha, layer.blend);
             continue;
         }
 
@@ -547,7 +566,7 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             const double width = explicit_size ? layer.width : texture.width;
             const double height = explicit_size ? layer.height : texture.height;
             draw_image(frame, texture, transform.x, transform.y, width, height, transform.scale_x,
-                       transform.scale_y, transform.rotation, alpha);
+                       transform.scale_y, transform.rotation, alpha, layer.blend);
             continue;
         }
 
@@ -567,10 +586,10 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
         }
 
         if (layer.type == project::LayerType::Solid) {
-            draw_solid(frame, red, green, blue, alpha);
+            draw_solid(frame, red, green, blue, alpha, layer.blend);
         } else if (layer.width > 0.0 && layer.height > 0.0) {
             draw_rect(frame, transform.x, transform.y, layer.width, layer.height, transform.scale_x,
-                      transform.scale_y, transform.rotation, red, green, blue, alpha);
+                      transform.scale_y, transform.rotation, red, green, blue, alpha, layer.blend);
         }
     }
     return frame;
