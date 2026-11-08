@@ -466,6 +466,9 @@ TEST_CASE("image opacity and texture alpha combine multiplicatively", "[renderer
     Project project = make_project(4, 4, 30.0, 1000);
     Layer image = make_layer("img", LayerType::Image, 0, 1000);
     image.source = "white";
+    // An explicit size keeps the sampled pixel interior rather than an AA edge.
+    image.width = 4.0;
+    image.height = 4.0;
     image.transform.x.constant = 2.0;
     image.transform.y.constant = 2.0;
     image.transform.opacity.constant = 0.5;
@@ -780,3 +783,183 @@ TEST_CASE("render_to_mp4 encodes H.264 as yuv420p and keeps the BT.709 tags", "[
     CHECK(info.find("color_transfer=bt709") != std::string::npos);
     CHECK(info.find("color_range=tv") != std::string::npos);
 }
+
+TEST_CASE("anti-aliasing: a pixel-aligned rect matches the hard-edged result", "[renderer][aa]") {
+    Project project = make_project(20, 20, 30.0, 1000);
+    Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+    rect.color = "#ff0000";
+    rect.width = 6.0;
+    rect.height = 4.0;
+    rect.transform.x.constant = 10.0;
+    rect.transform.y.constant = 10.0;
+    project.layers.push_back(rect);
+
+    // The rect spans x in [7, 13), y in [8, 12), which is aligned to the pixel
+    // grid, so every pixel is either fully covered or untouched: the analytic
+    // coverage reproduces the old inside/outside test exactly.
+    const renderer::Frame& frame = rendered(project, 0);
+
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 10, 10, red, green, blue);  // interior
+    CHECK(red == 255);
+    pixel(frame, 7, 8, red, green, blue);  // top-left corner pixel
+    CHECK(red == 255);
+    pixel(frame, 12, 11, red, green, blue);  // bottom-right corner pixel
+    CHECK(red == 255);
+    pixel(frame, 6, 10, red, green, blue);  // one column left of the rect
+    CHECK(red == 0);
+    pixel(frame, 13, 10, red, green, blue);  // one column right of the rect
+    CHECK(red == 0);
+    pixel(frame, 10, 7, red, green, blue);  // one row above the rect
+    CHECK(red == 0);
+    pixel(frame, 10, 12, red, green, blue);  // one row below the rect
+    CHECK(red == 0);
+}
+
+TEST_CASE("anti-aliasing: a rect edge at x = 10.5 is half covered in column 10", "[renderer][aa]") {
+    Project project = make_project(24, 24, 30.0, 1000);
+    Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+    rect.color = "#ffffff";
+    rect.width = 4.0;  // left edge at 12.5 - 2.0 = 10.5
+    rect.height = 10.0;
+    rect.transform.x.constant = 12.5;
+    rect.transform.y.constant = 12.0;
+    project.layers.push_back(rect);
+
+    const renderer::Frame& frame = rendered(project, 0);
+
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 10, 12, red, green, blue);  // centre 10.5 sits on the left edge
+    CHECK(red == Catch::Approx(127).margin(2));
+    pixel(frame, 14, 12, red, green, blue);  // centre 14.5 sits on the right edge
+    CHECK(red == Catch::Approx(127).margin(2));
+    pixel(frame, 11, 12, red, green, blue);  // fully inside
+    CHECK(red == 255);
+    pixel(frame, 9, 12, red, green, blue);  // fully outside
+    CHECK(red == 0);
+}
+
+TEST_CASE("anti-aliasing: a 45-degree rotated square has soft edges and area coverage",
+          "[renderer][aa]") {
+    Project project = make_project(100, 100, 30.0, 1000);
+    Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+    rect.color = "#ffffff";
+    rect.width = 40.0;
+    rect.height = 40.0;
+    rect.transform.x.constant = 50.0;
+    rect.transform.y.constant = 50.0;
+    rect.transform.rotation.constant = 45.0;
+    project.layers.push_back(rect);
+
+    const renderer::Frame& frame = rendered(project, 0);
+
+    double total = 0.0;
+    bool saw_partial = false;
+    bool saw_full = false;
+    for (int y = 0; y < frame.height; ++y) {
+        for (int x = 0; x < frame.width; ++x) {
+            int red = 0, green = 0, blue = 0;
+            pixel(frame, x, y, red, green, blue);
+            total += static_cast<double>(red) / 255.0;
+            if (red > 0 && red < 255) saw_partial = true;
+            if (red == 255) saw_full = true;
+        }
+    }
+
+    CHECK(saw_partial);  // the rotated edges are anti-aliased
+    CHECK(saw_full);     // the interior stays solid
+    // The summed coverage approximates the square's area (40 * 40 = 1600).
+    CHECK(total == Catch::Approx(1600.0).epsilon(0.01));
+}
+
+TEST_CASE("anti-aliasing: an image layer's edges are partially blended", "[renderer][aa]") {
+    Project project = make_project(8, 8, 30.0, 1000);
+    Layer image = make_layer("img", LayerType::Image, 0, 1000);
+    image.source = "white";
+    // A half-pixel offset puts the 2x2 texture's edges between pixel centres.
+    image.transform.x.constant = 4.5;
+    image.transform.y.constant = 4.5;
+    project.layers.push_back(image);
+
+    const renderer::Frame& frame =
+        rendered_with_image(project, 0, "white", make_uniform_texture(2, 2, 255));
+
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 4, 4, red, green, blue);  // interior texel, unchanged
+    CHECK(red == 255);
+    pixel(frame, 3, 4, red, green, blue);  // left edge, about half covered
+    CHECK(red > 100);
+    CHECK(red < 160);
+    pixel(frame, 2, 4, red, green, blue);  // fully outside
+    CHECK(red == 0);
+}
+
+TEST_CASE("anti-aliasing: non-finite and huge geometry never crashes", "[renderer][aa]") {
+    SECTION("a NaN width draws nothing") {
+        Project project = make_project(8, 8, 30.0, 1000);
+        Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+        rect.color = "#ffffff";
+        rect.width = std::numeric_limits<double>::quiet_NaN();
+        rect.height = 4.0;
+        rect.transform.x.constant = 4.0;
+        rect.transform.y.constant = 4.0;
+        project.layers.push_back(rect);
+
+        const renderer::Frame& frame = rendered(project, 0);
+        int red = 0, green = 0, blue = 0;
+        pixel(frame, 4, 4, red, green, blue);
+        CHECK(red == 0);
+    }
+
+    SECTION("a NaN scale draws nothing but does not crash") {
+        Project project = make_project(8, 8, 30.0, 1000);
+        Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+        rect.color = "#ffffff";
+        rect.width = 4.0;
+        rect.height = 4.0;
+        rect.transform.x.constant = 4.0;
+        rect.transform.y.constant = 4.0;
+        rect.transform.scale_x.constant = std::numeric_limits<double>::quiet_NaN();
+        project.layers.push_back(rect);
+
+        const renderer::Frame& frame = rendered(project, 0);
+        int red = 0, green = 0, blue = 0;
+        pixel(frame, 4, 4, red, green, blue);
+        CHECK(red == 0);
+    }
+
+    SECTION("a NaN rotation does not crash") {
+        Project project = make_project(8, 8, 30.0, 1000);
+        Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+        rect.color = "#ffffff";
+        rect.width = 4.0;
+        rect.height = 4.0;
+        rect.transform.x.constant = 4.0;
+        rect.transform.y.constant = 4.0;
+        rect.transform.rotation.constant = std::numeric_limits<double>::quiet_NaN();
+        project.layers.push_back(rect);
+
+        const std::variant<renderer::Frame, renderer::RenderError> result =
+            renderer::render_frame(project, 0);
+        REQUIRE(std::holds_alternative<renderer::Frame>(result));
+        REQUIRE(std::get<renderer::Frame>(result).rgba.size() == 8u * 8u * 4u);
+    }
+
+    SECTION("a huge rect is clipped to the canvas") {
+        Project project = make_project(8, 8, 30.0, 1000);
+        Layer rect = make_layer("box", LayerType::Rect, 0, 1000);
+        rect.color = "#ffffff";
+        rect.width = 1.0e9;
+        rect.height = 1.0e9;
+        rect.transform.x.constant = 4.0;
+        rect.transform.y.constant = 4.0;
+        project.layers.push_back(rect);
+
+        const renderer::Frame& frame = rendered(project, 0);
+        REQUIRE(frame.rgba.size() == 8u * 8u * 4u);
+        int red = 0, green = 0, blue = 0;
+        pixel(frame, 4, 4, red, green, blue);
+        CHECK(red == 255);  // the canvas is fully covered
+    }
+}
+

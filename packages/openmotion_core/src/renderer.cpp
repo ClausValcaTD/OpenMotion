@@ -30,11 +30,13 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-double clamp_alpha(double value) {
+double clamp_unit(double value) {
     if (!(value > 0.0)) return 0.0;  // also maps NaN to 0
     if (value > 1.0) return 1.0;
     return value;
 }
+
+double clamp_alpha(double value) { return clamp_unit(value); }
 
 // Resolves a layer source: an absolute path is used as is, otherwise it is
 // joined onto the cache base directory (when one is set).
@@ -145,6 +147,8 @@ struct Quad {
     double sin_a = 0.0;
     double half_w = 0.0;  // signed, so a negative scale mirrors the texture
     double half_h = 0.0;
+    double half_w_px = 0.0;  // |half_w| in output pixels, for edge coverage
+    double half_h_px = 0.0;
     int x_begin = 0;
     int x_end = 0;
     int y_begin = 0;
@@ -158,6 +162,8 @@ Quad make_quad(const Frame& frame, double center_x, double center_y, double widt
     quad.center_y = center_y;
     quad.half_w = width * scale_x * 0.5;
     quad.half_h = height * scale_y * 0.5;
+    quad.half_w_px = std::abs(quad.half_w);
+    quad.half_h_px = std::abs(quad.half_h);
 
     const double radians = rotation_deg * kPi / 180.0;
     quad.cos_a = std::cos(radians);
@@ -179,27 +185,34 @@ Quad make_quad(const Frame& frame, double center_x, double center_y, double widt
         max_y = std::max(max_y, py);
     }
 
-    quad.x_begin = clamp_pixel(std::floor(min_x), frame.width);
-    quad.x_end = clamp_pixel(std::ceil(max_x), frame.width);
-    quad.y_begin = clamp_pixel(std::floor(min_y), frame.height);
-    quad.y_end = clamp_pixel(std::ceil(max_y), frame.height);
+    // Expand by one pixel so the partially covered edge pixels are visited too.
+    quad.x_begin = clamp_pixel(std::floor(min_x) - 1.0, frame.width);
+    quad.x_end = clamp_pixel(std::ceil(max_x) + 1.0, frame.width);
+    quad.y_begin = clamp_pixel(std::floor(min_y) - 1.0, frame.height);
+    quad.y_end = clamp_pixel(std::ceil(max_y) + 1.0, frame.height);
     return quad;
 }
 
-// Visits every canvas pixel whose centre falls inside the transformed quad,
-// passing the pixel centre expressed in the quad's unrotated local frame.
+// Visits every canvas pixel near the transformed quad, passing the pixel centre
+// in the quad's unrotated local frame and its analytic edge coverage in [0,1].
+// Coverage is the product of the per-axis coverage of the two edges; it is 1
+// for interior pixels and falls to 0 within half a pixel outside the edge, so
+// rotated and scaled edges are anti-aliased without supersampling.
 template <typename Fn>
 void for_each_quad_pixel(const Quad& quad, Fn&& visit) {
-    const double abs_half_w = std::abs(quad.half_w);
-    const double abs_half_h = std::abs(quad.half_h);
     for (int y = quad.y_begin; y < quad.y_end; ++y) {
         for (int x = quad.x_begin; x < quad.x_end; ++x) {
             const double dx = (static_cast<double>(x) + 0.5) - quad.center_x;
             const double dy = (static_cast<double>(y) + 0.5) - quad.center_y;
             const double local_x = quad.cos_a * dx + quad.sin_a * dy;
             const double local_y = -quad.sin_a * dx + quad.cos_a * dy;
-            if (std::abs(local_x) <= abs_half_w && std::abs(local_y) <= abs_half_h) {
-                visit(x, y, local_x, local_y);
+            const double cov_x =
+                clamp_unit(quad.half_w_px - std::abs(local_x) + 0.5);
+            const double cov_y =
+                clamp_unit(quad.half_h_px - std::abs(local_y) + 0.5);
+            const double coverage = cov_x * cov_y;
+            if (coverage > 0.0) {
+                visit(x, y, local_x, local_y, coverage);
             }
         }
     }
@@ -210,8 +223,8 @@ void draw_rect(Frame& frame, double center_x, double center_y, double width, dou
                uint8_t blue, double alpha) {
     const Quad quad =
         make_quad(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg);
-    for_each_quad_pixel(quad, [&](int x, int y, double, double) {
-        blend_pixel(frame, x, y, red, green, blue, alpha);
+    for_each_quad_pixel(quad, [&](int x, int y, double, double, double coverage) {
+        blend_pixel(frame, x, y, red, green, blue, alpha * coverage);
     });
 }
 
@@ -317,14 +330,14 @@ void draw_image(Frame& frame, const Texture& texture, double center_x, double ce
     if (quad.half_w == 0.0 || quad.half_h == 0.0) {
         return;
     }
-    for_each_quad_pixel(quad, [&](int x, int y, double local_x, double local_y) {
+    for_each_quad_pixel(quad, [&](int x, int y, double local_x, double local_y, double coverage) {
         const double u = (local_x + quad.half_w) / (2.0 * quad.half_w);
         const double v = (local_y + quad.half_h) / (2.0 * quad.half_h);
         const Sample sample =
             sample_bilinear(texture, u * static_cast<double>(texture.width),
                             v * static_cast<double>(texture.height));
         blend_sample(frame, x, y, sample.red, sample.green, sample.blue,
-                     sample.alpha / 255.0 * opacity);
+                     sample.alpha / 255.0 * opacity * coverage);
     });
 }
 
