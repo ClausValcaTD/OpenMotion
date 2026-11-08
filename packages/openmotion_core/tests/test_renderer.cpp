@@ -1556,3 +1556,331 @@ TEST_CASE("non-finite circle and round_rect geometry never crashes", "[renderer]
         REQUIRE(std::holds_alternative<renderer::Frame>(result));
     }
 }
+
+namespace {
+
+// FNV-1a over the raw frame bytes: a stable fingerprint for byte-identity
+// checks that does not depend on the exact dimensions of the frame.
+uint64_t frame_hash(const renderer::Frame& frame) {
+    uint64_t hash = 1469598103934665603ull;
+    for (const uint8_t byte : frame.rgba) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+// A rect/circle/round_rect layer carrying a gradient fill, sized and centred to
+// fill the given box in a 100x100 canvas (unless the caller overrides it).
+Layer gradient_shape(const std::string& id, LayerType type, project::Gradient gradient) {
+    Layer layer = make_layer(id, type, 0, 1000);
+    layer.width = 100.0;
+    layer.height = 100.0;
+    layer.transform.x.constant = 50.0;
+    layer.transform.y.constant = 50.0;
+    layer.gradient = gradient;
+    return layer;
+}
+
+project::Gradient black_to_white(double start_x, double start_y, double end_x, double end_y) {
+    project::Gradient gradient;
+    gradient.start_color = "#000000";
+    gradient.end_color = "#ffffff";
+    gradient.start = {start_x, start_y};
+    gradient.end = {end_x, end_y};
+    return gradient;
+}
+
+}  // namespace
+
+TEST_CASE("a horizontal gradient ramps across its box and clamps outside the ramp",
+          "[renderer][gradient]") {
+    // A 100x100 box fills a 100x100 canvas; black -> white left to right. The
+    // box coordinate bx for pixel x is (x + 0.5) / 100.
+    auto build = [](project::Gradient gradient) {
+        Project project = make_project(100, 100, 30.0, 1000);
+        project.layers.push_back(gradient_shape("g", LayerType::Rect, gradient));
+        return project;
+    };
+
+    int red = 0, green = 0, blue = 0;
+    const renderer::Frame& frame = rendered(build(black_to_white(0.0, 0.0, 1.0, 0.0)), 0);
+    pixel(frame, 0, 50, red, green, blue);
+    CHECK(red == Catch::Approx(1).margin(2));  // bx = 0.005
+    pixel(frame, 49, 50, red, green, blue);
+    CHECK(red == Catch::Approx(126).margin(2));  // bx = 0.495
+    pixel(frame, 50, 50, red, green, blue);
+    CHECK(red == Catch::Approx(129).margin(2));  // bx = 0.505
+    pixel(frame, 99, 50, red, green, blue);
+    CHECK(red == Catch::Approx(254).margin(2));  // bx = 0.995
+    // The ramp is horizontal, so a different row is identical.
+    pixel(frame, 50, 0, red, green, blue);
+    CHECK(red == Catch::Approx(129).margin(2));
+
+    // A narrower ramp (0.25..0.75) clamps to the endpoint colours outside it.
+    const renderer::Frame& clamped = rendered(build(black_to_white(0.25, 0.0, 0.75, 0.0)), 0);
+    pixel(clamped, 0, 50, red, green, blue);  // bx = 0.005 < 0.25
+    CHECK(red == 0);
+    pixel(clamped, 24, 50, red, green, blue);  // bx = 0.245 < 0.25
+    CHECK(red == 0);
+    pixel(clamped, 75, 50, red, green, blue);  // bx = 0.755 > 0.75
+    CHECK(red == 255);
+    pixel(clamped, 99, 50, red, green, blue);  // bx = 0.995 > 0.75
+    CHECK(red == 255);
+}
+
+TEST_CASE("vertical, diagonal and rotated gradients follow their direction", "[renderer][gradient]") {
+    auto build = [](double rotation, project::Gradient gradient) {
+        Project project = make_project(100, 100, 30.0, 1000);
+        Layer box = gradient_shape("g", LayerType::Rect, gradient);
+        box.transform.rotation.constant = rotation;
+        project.layers.push_back(box);
+        return project;
+    };
+
+    int red = 0, green = 0, blue = 0;
+
+    // Vertical: the ramp follows y and is constant along x.
+    const renderer::Frame& vertical = rendered(build(0.0, black_to_white(0.0, 0.0, 0.0, 1.0)), 0);
+    pixel(vertical, 50, 0, red, green, blue);
+    CHECK(red == Catch::Approx(1).margin(2));
+    pixel(vertical, 50, 99, red, green, blue);
+    CHECK(red == Catch::Approx(254).margin(2));
+    pixel(vertical, 0, 50, red, green, blue);
+    CHECK(red == Catch::Approx(129).margin(2));
+
+    // 45 degrees: the ramp runs corner to corner and is constant along the
+    // anti-diagonal.
+    const renderer::Frame& diagonal = rendered(build(0.0, black_to_white(0.0, 0.0, 1.0, 1.0)), 0);
+    pixel(diagonal, 0, 0, red, green, blue);
+    CHECK(red == Catch::Approx(1).margin(2));
+    pixel(diagonal, 99, 99, red, green, blue);
+    CHECK(red == Catch::Approx(254).margin(2));
+    pixel(diagonal, 50, 50, red, green, blue);
+    CHECK(red == Catch::Approx(129).margin(2));
+    int r2 = 0, g2 = 0, b2 = 0;
+    pixel(diagonal, 10, 89, red, green, blue);
+    pixel(diagonal, 89, 10, r2, g2, b2);
+    CHECK(red == r2);
+
+    // A horizontal gradient rotated 90 degrees becomes vertical.
+    const renderer::Frame& rotated = rendered(build(90.0, black_to_white(0.0, 0.0, 1.0, 0.0)), 0);
+    pixel(rotated, 50, 0, red, green, blue);
+    CHECK(red == Catch::Approx(1).margin(2));
+    pixel(rotated, 50, 99, red, green, blue);
+    CHECK(red == Catch::Approx(254).margin(2));
+    pixel(rotated, 0, 50, red, green, blue);
+    CHECK(red == Catch::Approx(129).margin(2));
+    int r3 = 0, g3 = 0, b3 = 0;
+    pixel(rotated, 99, 50, r3, g3, b3);
+    CHECK(red == r3);
+}
+
+TEST_CASE("a degenerate gradient (start == end) is a flat fill with no NaN",
+          "[renderer][gradient]") {
+    Project project = make_project(64, 64, 30.0, 1000);
+    Layer box = make_layer("g", LayerType::Rect, 0, 1000);
+    box.width = 40.0;
+    box.height = 30.0;
+    box.transform.x.constant = 32.0;
+    box.transform.y.constant = 32.0;
+    project::Gradient gradient;
+    gradient.start_color = "#112233";
+    gradient.end_color = "#ffffff";
+    gradient.start = {0.3, 0.3};
+    gradient.end = {0.3, 0.3};  // zero-length ramp -> t = 0 everywhere
+    box.gradient = gradient;
+    project.layers.push_back(box);
+
+    const renderer::Frame& frame = rendered(project, 0);
+    int red = 0, green = 0, blue = 0;
+    pixel(frame, 32, 32, red, green, blue);
+    CHECK(red == 0x11);
+    CHECK(green == 0x22);
+    CHECK(blue == 0x33);
+    pixel(frame, 20, 32, red, green, blue);
+    CHECK(red == 0x11);
+    CHECK(green == 0x22);
+    CHECK(blue == 0x33);
+}
+
+TEST_CASE("an alpha gradient fades in and composes through the blend path",
+          "[renderer][gradient]") {
+    // Transparent red -> opaque red over a blue canvas.
+    auto build = [](project::BlendMode mode) {
+        Project project = make_project(100, 100, 30.0, 1000);
+        Layer backdrop = make_layer("bg", LayerType::Solid, 0, 1000);
+        backdrop.color = "#0000ff";
+        project.layers.push_back(backdrop);
+
+        Layer box = make_layer("g", LayerType::Rect, 0, 1000);
+        box.width = 100.0;
+        box.height = 100.0;
+        box.transform.x.constant = 50.0;
+        box.transform.y.constant = 50.0;
+        project::Gradient gradient;
+        gradient.start_color = "#ff000000";
+        gradient.end_color = "#ff0000ff";
+        gradient.start = {0.0, 0.0};
+        gradient.end = {1.0, 0.0};
+        box.gradient = gradient;
+        box.blend = mode;
+        project.layers.push_back(box);
+        return project;
+    };
+
+    int red = 0, green = 0, blue = 0;
+    const renderer::Frame& normal = rendered(build(project::BlendMode::Normal), 0);
+    pixel(normal, 0, 50, red, green, blue);  // t ~ 0: transparent, blue shows
+    CHECK(red == Catch::Approx(0).margin(2));
+    CHECK(blue == Catch::Approx(254).margin(2));
+    pixel(normal, 50, 50, red, green, blue);  // t ~ 0.5: half red over blue
+    CHECK(red == Catch::Approx(128).margin(2));
+    CHECK(green == Catch::Approx(0).margin(2));
+    CHECK(blue == Catch::Approx(128).margin(2));
+    pixel(normal, 99, 50, red, green, blue);  // t ~ 1: opaque red
+    CHECK(red == Catch::Approx(254).margin(2));
+    CHECK(blue == Catch::Approx(0).margin(2));
+
+    // With multiply the midpoint follows the blend formula: the blue backdrop
+    // kills the red source, so only the backdrop term survives.
+    const renderer::Frame& multiply = rendered(build(project::BlendMode::Multiply), 0);
+    pixel(multiply, 50, 50, red, green, blue);
+    CHECK(red == Catch::Approx(0).margin(2));
+    CHECK(blue == Catch::Approx(128).margin(2));
+}
+
+TEST_CASE("a constant-colour gradient matches a solid fill on circle and round_rect",
+          "[renderer][gradient]") {
+    // With start_color == end_color the gradient is a flat fill, so the drawn
+    // pixels - including the anti-aliased edges - must match a plain colour
+    // fill byte for byte. This pins the coverage/alpha handling.
+    auto build = [](LayerType type, bool use_gradient) {
+        Project project = make_project(160, 160, 30.0, 1000);
+        Layer shape = make_layer("s", type, 0, 1000);
+        shape.width = 100.0;
+        shape.height = 80.0;
+        shape.radius = 20.0;
+        shape.transform.x.constant = 80.0;
+        shape.transform.y.constant = 80.0;
+        if (use_gradient) {
+            project::Gradient gradient;
+            gradient.start_color = "#808080";
+            gradient.end_color = "#808080";
+            shape.gradient = gradient;
+        } else {
+            shape.color = "#808080";
+        }
+        project.layers.push_back(shape);
+        return project;
+    };
+
+    for (const LayerType type : {LayerType::Circle, LayerType::RoundRect}) {
+        const renderer::Frame& with_gradient = rendered(build(type, true), 0);
+        const renderer::Frame& solid = rendered(build(type, false), 0);
+        REQUIRE(with_gradient.rgba.size() == solid.rgba.size());
+        CHECK(with_gradient.rgba == solid.rgba);
+    }
+}
+
+TEST_CASE("gradient opacity halves the contribution", "[renderer][gradient]") {
+    auto build = [](double opacity) {
+        Project project = make_project(64, 64, 30.0, 1000);
+        Layer box = make_layer("g", LayerType::Circle, 0, 1000);
+        box.width = 40.0;
+        box.height = 40.0;
+        box.transform.x.constant = 32.0;
+        box.transform.y.constant = 32.0;
+        box.transform.opacity.constant = opacity;
+        project::Gradient gradient;
+        gradient.start_color = "#808080";
+        gradient.end_color = "#808080";
+        box.gradient = gradient;
+        project.layers.push_back(box);
+        return project;
+    };
+
+    int red = 0, green = 0, blue = 0;
+    pixel(rendered(build(1.0), 0), 32, 32, red, green, blue);
+    CHECK(red == 128);
+    pixel(rendered(build(0.5), 0), 32, 32, red, green, blue);
+    CHECK(red == Catch::Approx(64).margin(1));
+}
+
+TEST_CASE("a gradient replaces the colour on the fill", "[renderer][gradient]") {
+    // A bright red "color" alongside a black->white gradient: the fill must be
+    // the gradient, not the colour.
+    Project project = make_project(100, 100, 30.0, 1000);
+    Layer box = gradient_shape("g", LayerType::Rect, black_to_white(0.0, 0.0, 1.0, 0.0));
+    box.color = "#ff0000";
+    project.layers.push_back(box);
+
+    int red = 0, green = 0, blue = 0;
+    const renderer::Frame& frame = rendered(project, 0);
+    pixel(frame, 0, 50, red, green, blue);
+    CHECK(red == Catch::Approx(1).margin(2));  // black end, not red
+    CHECK(green == Catch::Approx(1).margin(2));
+    pixel(frame, 99, 50, red, green, blue);
+    CHECK(red == Catch::Approx(254).margin(2));  // white end
+    CHECK(green == Catch::Approx(254).margin(2));
+}
+
+TEST_CASE("layer scale stretches the gradient with the box", "[renderer][gradient]") {
+    auto build = [](double scale) {
+        Project project = make_project(100, 100, 30.0, 1000);
+        Layer box = make_layer("g", LayerType::Rect, 0, 1000);
+        box.width = 50.0;
+        box.height = 50.0;
+        box.transform.x.constant = 50.0;
+        box.transform.y.constant = 50.0;
+        box.transform.scale_x.constant = scale;
+        box.transform.scale_y.constant = scale;
+        box.gradient = black_to_white(0.0, 0.0, 1.0, 0.0);
+        project.layers.push_back(box);
+        return project;
+    };
+
+    int red = 0, green = 0, blue = 0;
+    const renderer::Frame& unscaled = rendered(build(1.0), 0);
+    const renderer::Frame& scaled = rendered(build(2.0), 0);
+
+    // Unscaled, the ramp spans the 50 px box (x = 25..75).
+    pixel(unscaled, 25, 50, red, green, blue);
+    CHECK(red == Catch::Approx(3).margin(2));  // bx = 0.01
+    pixel(unscaled, 74, 50, red, green, blue);
+    CHECK(red == Catch::Approx(252).margin(2));  // bx = 0.99
+
+    // Scaled 2x, the same ramp is stretched across 100 px (x = 0..100).
+    pixel(scaled, 0, 50, red, green, blue);
+    CHECK(red == Catch::Approx(1).margin(2));  // bx = 0.005
+    pixel(scaled, 25, 50, red, green, blue);
+    CHECK(red == Catch::Approx(65).margin(2));  // bx = 0.255
+    pixel(scaled, 99, 50, red, green, blue);
+    CHECK(red == Catch::Approx(254).margin(2));  // bx = 0.995
+}
+
+TEST_CASE("a gradient-free project renders identically to the pre-gradient build",
+          "[renderer][gradient]") {
+    // hello.omproj has no gradient fields. These frame fingerprints were taken
+    // from a build of main (before gradient support) and must not change: the
+    // gradient feature is additive and leaves gradient-free layers untouched.
+    const std::variant<Project, project::ProjectError> loaded =
+        project::load_from_file(std::string(OPENMOTION_EXAMPLE_DIR) + "/hello.omproj");
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const Project& project = std::get<Project>(loaded);
+
+    const int64_t times[] = {0, 750, 1500, 2250, 2999};
+    const uint64_t expected[] = {
+        5607503371744396227ull,
+        3972112670246988803ull,
+        14818619873435020291ull,
+        6074651363686509571ull,
+        7764016024346520579ull,
+    };
+    for (std::size_t i = 0; i < 5; ++i) {
+        const renderer::Frame& frame = rendered(project, times[i]);
+        INFO("timestamp " << times[i]);
+        CHECK(frame_hash(frame) == expected[i]);
+    }
+}
+

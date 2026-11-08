@@ -790,3 +790,267 @@ TEST_CASE("a circle layer never serializes a radius", "[project]") {
     CHECK(encoded.find("\"type\": \"circle\"") != std::string::npos);
     CHECK(encoded.find("radius") == std::string::npos);
 }
+
+namespace {
+
+// Structural comparison of a gradient, so a round trip can be checked without
+// touching the shared layers_equal helper.
+bool gradients_equal(const std::optional<project::Gradient>& lhs,
+                     const std::optional<project::Gradient>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) return false;
+    if (!lhs.has_value()) return true;
+    return lhs->start_color == rhs->start_color && lhs->end_color == rhs->end_color &&
+           lhs->start == rhs->start && lhs->end == rhs->end;
+}
+
+}  // namespace
+
+TEST_CASE("a gradient round trips through JSON", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "rect", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0,
+          "gradient": { "start_color": "#000000", "end_color": "#ffffff",
+                        "start": [0.0, 0.0], "end": [1.0, 0.0] } },
+        { "id": "c", "type": "circle", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0,
+          "gradient": { "start_color": "#11223344", "end_color": "#aabbccdd",
+                        "start": [-0.5, 0.25], "end": [1.5, 0.75] } }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    const Project& parsed = std::get<Project>(loaded);
+    REQUIRE(parsed.layers[0].gradient.has_value());
+    CHECK(parsed.layers[0].gradient->start_color == "#000000");
+    CHECK(parsed.layers[0].gradient->end_color == "#ffffff");
+    CHECK(parsed.layers[0].gradient->start == std::array<double, 2>{0.0, 0.0});
+    CHECK(parsed.layers[0].gradient->end == std::array<double, 2>{1.0, 0.0});
+    REQUIRE(parsed.layers[1].gradient.has_value());
+    CHECK(parsed.layers[1].gradient->start_color == "#11223344");
+    CHECK(parsed.layers[1].gradient->end == std::array<double, 2>{1.5, 0.75});
+
+    const std::variant<Project, ProjectError> reloaded =
+        project::load_from_string(project::to_json_string(parsed));
+    REQUIRE(std::holds_alternative<Project>(reloaded));
+    const Project& round = std::get<Project>(reloaded);
+    REQUIRE(round.layers.size() == parsed.layers.size());
+    for (std::size_t i = 0; i < parsed.layers.size(); ++i) {
+        CHECK(gradients_equal(parsed.layers[i].gradient, round.layers[i].gradient));
+    }
+}
+
+TEST_CASE("gradient defaults fill in for omitted endpoints", "[project]") {
+    // Only the colours are given, so start/end keep their defaults.
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "round_rect", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0, "radius": 2.0,
+          "gradient": { "start_color": "#010203", "end_color": "#040506" } }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    REQUIRE(std::get<Project>(loaded).layers[0].gradient.has_value());
+    const project::Gradient& gradient = *std::get<Project>(loaded).layers[0].gradient;
+    CHECK(gradient.start == std::array<double, 2>{0.0, 0.0});
+    CHECK(gradient.end == std::array<double, 2>{1.0, 0.0});
+}
+
+TEST_CASE("a gradient is omitted from JSON when absent", "[project]") {
+    const std::string text = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "rect", "start_ms": 0, "end_ms": 0,
+          "color": "#112233", "width": 10.0, "height": 10.0 }
+      ]
+    })";
+    const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+    REQUIRE(std::holds_alternative<Project>(loaded));
+    CHECK_FALSE(std::get<Project>(loaded).layers[0].gradient.has_value());
+    const std::string encoded = project::to_json_string(std::get<Project>(loaded));
+    CHECK(encoded.find("gradient") == std::string::npos);
+}
+
+TEST_CASE("a gradient leaves the rest of the layer JSON unchanged", "[project]") {
+    const std::string plain = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "rect", "start_ms": 0, "end_ms": 0,
+          "color": "#112233", "width": 10.0, "height": 10.0 }
+      ]
+    })";
+    const std::string with_gradient = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "rect", "start_ms": 0, "end_ms": 0,
+          "color": "#112233", "width": 10.0, "height": 10.0,
+          "gradient": { "start_color": "#000000", "end_color": "#ffffff",
+                        "start": [0.0, 0.0], "end": [1.0, 0.0] } }
+      ]
+    })";
+
+    const std::variant<Project, ProjectError> a = project::load_from_string(plain);
+    const std::variant<Project, ProjectError> b = project::load_from_string(with_gradient);
+    REQUIRE(std::holds_alternative<Project>(a));
+    REQUIRE(std::holds_alternative<Project>(b));
+    const std::string encoded_a = project::to_json_string(std::get<Project>(a));
+    const std::string encoded_b = project::to_json_string(std::get<Project>(b));
+
+    // Removing the "gradient" object (and the comma that precedes it) from the
+    // second encoding yields exactly the first: every other field is emitted
+    // identically. Braces are matched so this is independent of key order and
+    // indentation.
+    const std::size_t key = encoded_b.find("\"gradient\"");
+    REQUIRE(key != std::string::npos);
+    const std::size_t open = encoded_b.find('{', key);
+    REQUIRE(open != std::string::npos);
+    std::size_t depth = 0;
+    std::size_t close = std::string::npos;
+    for (std::size_t i = open; i < encoded_b.size(); ++i) {
+        if (encoded_b[i] == '{') {
+            ++depth;
+        } else if (encoded_b[i] == '}') {
+            --depth;
+            if (depth == 0) {
+                close = i;
+                break;
+            }
+        }
+    }
+    REQUIRE(close != std::string::npos);
+    // Walk back over whitespace to the comma that separates the gradient from
+    // the previous field.
+    std::size_t begin = key;
+    while (begin > 0 && encoded_b[begin - 1] != ',') {
+        --begin;
+    }
+    REQUIRE(begin > 0);
+    --begin;  // include the comma itself
+    std::string rebuilt = encoded_b;
+    rebuilt.erase(begin, close - begin + 1);
+    CHECK(rebuilt == encoded_a);
+}
+
+TEST_CASE("gradient validation rejects malformed colours and endpoints", "[project]") {
+    const std::string prefix = R"({
+      "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+      "layers": [
+        { "id": "r", "type": "rect", "start_ms": 0, "end_ms": 0,
+          "width": 10.0, "height": 10.0, "gradient": )";
+    const std::string suffix = R"( }
+      ]
+    })";
+
+    SECTION("start_color without a hash") {
+        CHECK(is_error(project::load_from_string(
+            prefix + R"({ "start_color": "000000", "end_color": "#ffffff" })" + suffix)));
+    }
+    SECTION("start_color with a bad hex digit") {
+        CHECK(is_error(project::load_from_string(
+            prefix + R"({ "start_color": "#gg0000", "end_color": "#ffffff" })" + suffix)));
+    }
+    SECTION("start_color with the wrong length") {
+        CHECK(is_error(project::load_from_string(
+            prefix + R"({ "start_color": "#fff", "end_color": "#ffffff" })" + suffix)));
+    }
+    SECTION("end_color is not a string") {
+        CHECK(is_error(project::load_from_string(
+            prefix + R"({ "start_color": "#000000", "end_color": 5 })" + suffix)));
+    }
+    SECTION("start is not an array of two numbers") {
+        CHECK(is_error(project::load_from_string(
+            prefix + R"({ "start_color": "#000000", "end_color": "#ffffff", "start": [0.0] })" +
+            suffix)));
+    }
+    SECTION("start has three elements") {
+        CHECK(is_error(project::load_from_string(
+            prefix +
+            R"({ "start_color": "#000000", "end_color": "#ffffff", "start": [0.0, 0.0, 0.0] })" +
+            suffix)));
+    }
+    SECTION("end holds a non-number") {
+        CHECK(is_error(project::load_from_string(
+            prefix +
+            R"({ "start_color": "#000000", "end_color": "#ffffff", "end": [0.0, "x"] })" +
+            suffix)));
+    }
+    SECTION("1e400 overflows to infinity") {
+        CHECK(is_error(project::load_from_string(
+            prefix +
+            R"({ "start_color": "#000000", "end_color": "#ffffff", "start": [1e400, 0.0] })" +
+            suffix)));
+    }
+    SECTION("a value above 1000 is rejected") {
+        CHECK(is_error(project::load_from_string(
+            prefix +
+            R"({ "start_color": "#000000", "end_color": "#ffffff", "end": [1001.0, 0.0] })" +
+            suffix)));
+    }
+    SECTION("a value below -1000 is rejected") {
+        CHECK(is_error(project::load_from_string(
+            prefix +
+            R"({ "start_color": "#000000", "end_color": "#ffffff", "start": [0.0, -1001.0] })" +
+            suffix)));
+    }
+    SECTION("a non-object gradient") {
+        CHECK(is_error(project::load_from_string(prefix + R"([0.0, 0.0])" + suffix)));
+    }
+}
+
+TEST_CASE("a gradient on a non-shape layer is a ProjectError", "[project]") {
+    const struct {
+        const char* type;
+        const char* extra;
+    } cases[] = {
+        {"solid", ""},
+        {"image", R"(, "source": "a.png")"},
+        {"video", R"(, "source": "a.mp4")"},
+        {"audio", R"(, "source": "a.wav")"},
+        {"text", R"(, "text": "hi")"},
+    };
+
+    for (const auto& test : cases) {
+        const std::string text = std::string(R"({
+          "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+          "layers": [
+            { "id": "a", "type": ")" ) + test.type + R"(", "start_ms": 0, "end_ms": 0)" +
+                                 test.extra +
+                                 R"(,
+              "gradient": { "start_color": "#000000", "end_color": "#ffffff" } }
+          ]
+        })";
+        INFO("type " << test.type);
+        CHECK(is_error(project::load_from_string(text)));
+    }
+}
+
+TEST_CASE("a gradient is allowed on rect, circle and round_rect", "[project]") {
+    const struct {
+        const char* type;
+        const char* extra;
+    } cases[] = {
+        {"rect", ""},
+        {"circle", ""},
+        {"round_rect", R"(, "radius": 3.0)"},
+    };
+
+    for (const auto& test : cases) {
+        const std::string text = std::string(R"({
+          "version": 1, "width": 10, "height": 10, "fps": 1.0, "duration_ms": 0,
+          "layers": [
+            { "id": "a", "type": ")" ) + test.type + R"(", "start_ms": 0, "end_ms": 0,
+              "width": 10.0, "height": 10.0)" + test.extra +
+                                 R"(,
+              "gradient": { "start_color": "#000000", "end_color": "#ffffff" } }
+          ]
+        })";
+        INFO("type " << test.type);
+        const std::variant<Project, ProjectError> loaded = project::load_from_string(text);
+        REQUIRE(std::holds_alternative<Project>(loaded));
+        CHECK(std::get<Project>(loaded).layers[0].gradient.has_value());
+    }
+}

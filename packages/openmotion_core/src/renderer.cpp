@@ -77,12 +77,108 @@ bool parse_color(const std::string& text, uint8_t& red, uint8_t& green, uint8_t&
     return true;
 }
 
+// Parses "#RRGGBB" or "#RRGGBBAA" into normalized RGBA in [0, 1]. Returns false
+// for anything else. Used for gradient endpoints (which may carry alpha).
+bool parse_rgba_color(const std::string& text, double& red, double& green, double& blue,
+                      double& alpha) {
+    if ((text.size() != 7 && text.size() != 9) || text[0] != '#') {
+        return false;
+    }
+    const auto hex_value = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    int digits[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (std::size_t i = 1; i < text.size(); ++i) {
+        digits[i - 1] = hex_value(text[i]);
+        if (digits[i - 1] < 0) {
+            return false;
+        }
+    }
+    red = static_cast<double>(digits[0] * 16 + digits[1]) / 255.0;
+    green = static_cast<double>(digits[2] * 16 + digits[3]) / 255.0;
+    blue = static_cast<double>(digits[4] * 16 + digits[5]) / 255.0;
+    alpha = text.size() == 9 ? static_cast<double>(digits[6] * 16 + digits[7]) / 255.0 : 1.0;
+    return true;
+}
+
 // Source-over blend of one straight-alpha channel pair onto an opaque canvas.
 double blend_channel(double source, double destination, double alpha) {
     const double value = source * alpha + destination * (1.0 - alpha);
     if (value <= 0.0) return 0.0;
     if (value >= 255.0) return 255.0;
     return value;
+}
+
+// A linear gradient resolved for one layer: the ramp endpoints in the layer's
+// normalized box and the premultiplied endpoint colours. Built once per layer
+// per frame so nothing is parsed or allocated per pixel.
+struct GradientFill {
+    double start_x = 0.0;
+    double start_y = 0.0;
+    double dir_x = 1.0;
+    double dir_y = 0.0;
+    double len_sq = 1.0;
+    double sr = 0.0, sg = 0.0, sb = 0.0, sa = 1.0;  // premultiplied start colour
+    double er = 0.0, eg = 0.0, eb = 0.0, ea = 1.0;  // premultiplied end colour
+};
+
+// Reads a "#RRGGBB"/"#RRGGBBAA" colour into premultiplied components. A colour
+// the parser rejects (only reachable for a hand-built project, since the loader
+// validates) becomes opaque black.
+void premultiplied_color(const std::string& text, double& red, double& green, double& blue,
+                         double& alpha) {
+    double r = 0.0, g = 0.0, b = 0.0, a = 1.0;
+    if (!parse_rgba_color(text, r, g, b, a)) {
+        r = 0.0;
+        g = 0.0;
+        b = 0.0;
+        a = 1.0;
+    }
+    red = r * a;
+    green = g * a;
+    blue = b * a;
+    alpha = a;
+}
+
+GradientFill make_gradient_fill(const project::Gradient& gradient) {
+    GradientFill fill;
+    fill.start_x = gradient.start[0];
+    fill.start_y = gradient.start[1];
+    fill.dir_x = gradient.end[0] - gradient.start[0];
+    fill.dir_y = gradient.end[1] - gradient.start[1];
+    fill.len_sq = fill.dir_x * fill.dir_x + fill.dir_y * fill.dir_y;
+    premultiplied_color(gradient.start_color, fill.sr, fill.sg, fill.sb, fill.sa);
+    premultiplied_color(gradient.end_color, fill.er, fill.eg, fill.eb, fill.ea);
+    return fill;
+}
+
+// Straight-alpha colour of `fill` at normalized box position (bx, by), as RGB in
+// 0..255 and alpha in 0..1. The ramp parameter is clamped to [0, 1]; a
+// degenerate ramp (start == end) yields t = 0.
+void gradient_at(const GradientFill& fill, double bx, double by, double& red, double& green,
+                 double& blue, double& alpha) {
+    double t = 0.0;
+    if (fill.len_sq >= 1e-12) {
+        t = clamp_unit(((bx - fill.start_x) * fill.dir_x + (by - fill.start_y) * fill.dir_y) /
+                       fill.len_sq);
+    }
+    const double pa = fill.sa + (fill.ea - fill.sa) * t;
+    const double pr = fill.sr + (fill.er - fill.sr) * t;
+    const double pg = fill.sg + (fill.eg - fill.sg) * t;
+    const double pb = fill.sb + (fill.eb - fill.sb) * t;
+    if (pa > 0.0) {
+        red = (pr / pa) * 255.0;
+        green = (pg / pa) * 255.0;
+        blue = (pb / pa) * 255.0;
+    } else {
+        red = 0.0;
+        green = 0.0;
+        blue = 0.0;
+    }
+    alpha = pa;
 }
 
 // One channel (0..255) of a layer pixel blended onto the opaque canvas.
@@ -269,27 +365,43 @@ double round_rect_coverage(double local_x, double local_y, double hx, double hy,
 }
 
 // Rasterizes a filled shape whose coverage the caller derives from the local
-// coordinates and half extents, then composites through the blend path.
+// coordinates and half extents, then composites through the blend path. When
+// `gradient` is non-null the fill colour is sampled per pixel instead of using
+// the constant (red, green, blue), and its alpha folds into the effective alpha.
 template <typename Coverage>
 void draw_shape(Frame& frame, double center_x, double center_y, double width, double height,
                 double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
-                uint8_t blue, double alpha, project::BlendMode mode, Coverage&& coverage_fn) {
+                uint8_t blue, double alpha, project::BlendMode mode, const GradientFill* gradient,
+                Coverage&& coverage_fn) {
     const Quad quad =
         make_quad(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg);
     for_each_quad_pixel(quad, [&](int x, int y, double local_x, double local_y, double hx,
                                   double hy) {
         const double coverage = coverage_fn(local_x, local_y, hx, hy);
-        if (coverage > 0.0) {
-            blend_pixel(frame, x, y, red, green, blue, alpha * coverage, mode);
+        if (coverage <= 0.0) {
+            return;
         }
+        if (gradient == nullptr) {
+            blend_pixel(frame, x, y, red, green, blue, alpha * coverage, mode);
+            return;
+        }
+        // Map the local (output-pixel) coordinates to the layer's unscaled
+        // normalized box. A degenerate half extent pins the axis to the centre.
+        const double bx = hx > 0.0 ? local_x / (2.0 * hx) + 0.5 : 0.5;
+        const double by = hy > 0.0 ? local_y / (2.0 * hy) + 0.5 : 0.5;
+        double gr = 0.0, gg = 0.0, gb = 0.0, ga = 1.0;
+        gradient_at(*gradient, bx, by, gr, gg, gb, ga);
+        blend_pixel(frame, x, y, static_cast<uint8_t>(std::lround(gr)),
+                    static_cast<uint8_t>(std::lround(gg)),
+                    static_cast<uint8_t>(std::lround(gb)), alpha * coverage * ga, mode);
     });
 }
 
 void draw_rect(Frame& frame, double center_x, double center_y, double width, double height,
                double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
-               uint8_t blue, double alpha, project::BlendMode mode) {
+               uint8_t blue, double alpha, project::BlendMode mode, const GradientFill* gradient) {
     draw_shape(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg, red, green,
-               blue, alpha, mode,
+               blue, alpha, mode, gradient,
                [](double local_x, double local_y, double hx, double hy) {
                    return rect_coverage(local_x, local_y, hx, hy);
                });
@@ -297,9 +409,9 @@ void draw_rect(Frame& frame, double center_x, double center_y, double width, dou
 
 void draw_circle(Frame& frame, double center_x, double center_y, double width, double height,
                  double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
-                 uint8_t blue, double alpha, project::BlendMode mode) {
+                 uint8_t blue, double alpha, project::BlendMode mode, const GradientFill* gradient) {
     draw_shape(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg, red, green,
-               blue, alpha, mode,
+               blue, alpha, mode, gradient,
                [](double local_x, double local_y, double hx, double hy) {
                    return circle_coverage(local_x, local_y, hx, hy);
                });
@@ -308,12 +420,12 @@ void draw_circle(Frame& frame, double center_x, double center_y, double width, d
 void draw_round_rect(Frame& frame, double center_x, double center_y, double width, double height,
                      double scale_x, double scale_y, double rotation_deg, double radius,
                      uint8_t red, uint8_t green, uint8_t blue, double alpha,
-                     project::BlendMode mode) {
+                     project::BlendMode mode, const GradientFill* gradient) {
     // The radius scales with the layer, using the smaller axis so the corners
     // stay circular under a non-uniform scale.
     const double scaled_radius = radius * std::min(std::abs(scale_x), std::abs(scale_y));
     draw_shape(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg, red, green,
-               blue, alpha, mode,
+               blue, alpha, mode, gradient,
                [scaled_radius](double local_x, double local_y, double hx, double hy) {
                    return round_rect_coverage(local_x, local_y, hx, hy, scaled_radius);
                });
@@ -677,8 +789,21 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             continue;  // text layers are not rendered yet
         }
 
+        // A gradient fill is only defined for the shapes; the loader rejects it
+        // elsewhere, but a hand-built project falls back to a plain colour.
+        const bool has_gradient =
+            layer.gradient.has_value() && (is_rect || is_circle || is_round_rect);
+        GradientFill gradient_fill;
+        const GradientFill* gradient = nullptr;
+        if (has_gradient) {
+            gradient_fill = make_gradient_fill(*layer.gradient);
+            gradient = &gradient_fill;
+        }
+
         uint8_t red = 0, green = 0, blue = 0;
-        if (!parse_color(layer.color, red, green, blue)) {
+        // A gradient replaces "color" for the fill, so the color string is only
+        // parsed when there is no gradient.
+        if (gradient == nullptr && !parse_color(layer.color, red, green, blue)) {
             return RenderError{"invalid color '" + layer.color + "' on layer " + layer.id};
         }
 
@@ -688,15 +813,15 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             if (is_circle) {
                 draw_circle(frame, transform.x, transform.y, layer.width, layer.height,
                             transform.scale_x, transform.scale_y, transform.rotation, red, green,
-                            blue, alpha, layer.blend);
+                            blue, alpha, layer.blend, gradient);
             } else if (is_round_rect) {
                 draw_round_rect(frame, transform.x, transform.y, layer.width, layer.height,
                                 transform.scale_x, transform.scale_y, transform.rotation,
-                                layer.radius, red, green, blue, alpha, layer.blend);
+                                layer.radius, red, green, blue, alpha, layer.blend, gradient);
             } else {
                 draw_rect(frame, transform.x, transform.y, layer.width, layer.height,
                           transform.scale_x, transform.scale_y, transform.rotation, red, green, blue,
-                          alpha, layer.blend);
+                          alpha, layer.blend, gradient);
             }
         }
     }

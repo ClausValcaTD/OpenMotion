@@ -42,6 +42,17 @@ enum class LayerType { Solid, Rect, Text, Video, Image, Audio, Circle, RoundRect
 // any project that omits "blend", keep the plain source-over result.
 enum class BlendMode { Normal, Multiply, Screen, Overlay, Exclusion, ColorBurn, LinearDodge };
 
+// A linear gradient fill for rect/circle/round_rect layers. Colours are
+// "#RRGGBB" or "#RRGGBBAA"; start/end are the ramp's endpoints in the layer's
+// normalised box (0,0 = top-left, 1,1 = bottom-right; values outside 0..1 are
+// allowed and clamp at render time).
+struct Gradient {
+    std::string start_color = "#000000";
+    std::string end_color = "#FFFFFF";
+    std::array<double, 2> start = {0.0, 0.0};
+    std::array<double, 2> end = {1.0, 0.0};
+};
+
 struct Layer {
     std::string id;
     LayerType   type;
@@ -57,6 +68,10 @@ struct Layer {
     int64_t     in_ms = 0;              // source offset, used by Audio
     double      volume = 1.0;           // 0..10, used by Audio
     BlendMode   blend = BlendMode::Normal;  // ignored by Audio
+    // Optional linear gradient fill, allowed only on rect/circle/round_rect
+    // layers. When set it replaces `color` for the fill. Absent by default so
+    // existing projects serialize byte-identically.
+    std::optional<Gradient> gradient;
 };
 
 struct Project {
