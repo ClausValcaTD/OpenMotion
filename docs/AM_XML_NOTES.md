@@ -1,82 +1,110 @@
-# Alight Motion XML notes
+# Alight Motion XML notes (structure only)
 
-> **UNVERIFIED.** These notes were derived from reading how another open-source
-> project parses Alight Motion project XML. They describe structure only and must
-> be checked against real Alight Motion exports before the converter relies on
-> them. No code, shader or asset from any other project is used.
+> Verified against five real exports produced by Alight Motion 5.0.275
+> (Android, file-format version `ffver 106`). Items tagged `[verified]` were
+> checked numerically against those files; `[assumed]` items were not. Other
+> versions/platforms may differ.
 
-## Scene
+## Root
 
-The root element carries the scene attributes:
+`[verified]` `<scene>` attributes: `title`, `width`, `height`, `exportWidth`,
+`exportHeight`, `precompose`, `bgcolor` (`#AARRGGBB`, transparent in the
+samples), `totalTime` (ms), `fps`, `modifiedTime`, `amver`, `ffver`, `am`,
+`amplatform`, `retime`, `retimeAdaptFPS`. A leading XML comment records app
+name/version/export time.
 
-- `title`
-- `width`
-- `height`
-- `fps`
-- `totalTime` — in milliseconds
-- `bgcolor` — as `#AARRGGBB`
+`[verified]` Children of `<scene>` are layers, then possibly
+`<bookmark t="ms"/>` markers (`t` in milliseconds, NOT a fraction). Layers
+appear in file order, `[assumed]` bottom to top (the full-frame background is
+first, a full-frame effects layer is last).
 
-## Media entries
+## Layer elements (all `[verified]` unless noted)
 
-`<media>` entries describe source files; layers reference them. Attributes seen:
-`uri`, `filename`, `title`, `src`, `type`, `width`, `height`, `orientation`.
+`shape`, `text`, `embedScene`, `nullobj` (`type="perspective"` seen).
 
-## Layers
+Common attributes: `id`, `label`, `startTime`, `endTime` (ms), `fillType`,
+`mediaFillMode`, `parent` (id), `hidden`, `clippingMask`, `blending`.
 
-Layer elements seen: `layer`, `shape`, `drawing`, `text`, `image`, `video`,
-`audio`, `null`, `group`, `embedscene`, `camera`.
+`fillType` values: `color`, `gradient`, `media`, `none`, `intrinsic`
+(embedScene).
 
-Attributes seen: `id`, `label`/`name`, `startTime` and `endTime` (ms), `parent`
-(the id of a parent layer), `hidden`, `fillVideo`/`fillImage`/`src`,
-`mediaFillMode`, `s` (a shape name such as `".roundrect"`), `radius`.
+`blending` values seen: `screen`, `multiply`, `exclude`, `color-burn`,
+`linear-dodge`, `mask`.
 
-A `size` property exists and appears to be stored as half-extents (the full size
-is 2x the stored value).
+**shape:** `s` = `.rect` | `.roundrect` | `.circle` | `.line`, or a
+`<path d="...">` using M/L/Z commands plus `<path-stroke direction join
+end-size>` with `<color>` and `<size>`. `<fillColor value="#AARRGGBB"/>`.
+`<gradient type="linear" startColor endColor start end/>` with normalized
+coordinates. `<property name="size" type="vec2">` holds HALF-extents: a rect's
+full size = 2 x size x scale; a circle's radius = size x scale. Images are
+shapes with `fillType="media"` and `fillImage="content://..."` (an Android
+content URI that is meaningless off-device). The only portable identifier is
+the layer label, which is the file name; a converter must look for that file
+next to the XML. No `<media>` element exists in these files. `[assumed]`
+video/audio are represented similarly; none were present.
 
-## Transform
+**text:** attributes `size` (font size), `font`
+(`"googlefonts?name=...&weight=..."`), `wrapWidth`, `align`; text lives in a
+`<content>` child.
 
-`<transform>` children seen: `location`, `scale`, `rotation`, `rotationX`,
-`rotationY`, `skew`, `opacity`, `pivot`.
+**embedScene:** a precomposition. Contains a complete nested `<scene>` with its
+own size/fps/totalTime, plus its own `<transform>` and `<effect>` children;
+attribute `outTime` equals the layer duration. `[assumed]` mapping between the
+layer time and the nested scene time is not yet understood. 11 of the 16 scenes
+in the samples are nested.
 
-Each is either a constant (a `value` attribute holding one or more numbers) or
-contains keyframes of the form `<kf t="..." v="..." e="..."/>`.
+## Transform and keyframes
 
-Keyframe time `t` is a fraction from 0 to 1 of the layer's own duration, **not**
-seconds. The easing attribute `e` is stored on the keyframe the motion ARRIVES
-at (the easing of the segment from keyframe `k` to `k+1` comes from keyframe
-`k+1`). Our `.omproj` stores easing on the START keyframe, so the converter must
-shift it by one position. Easing values seen include
-`"cubicBezier x1 y1 x2 y2"`, step/hold, and named curves such as elastic and
-bounce.
+`<transform>` children: `location` (3 numbers), `scale` (2 numbers, a
+multiplier of size), `pivot` (2 numbers), `rotation` (scalar), `opacity`
+(0..1). Each is either a `value` attribute or a list of `<kf t v e>` children.
 
-## Parenting and placement
+`[verified]` Keyframes are NOT stored in time order; sort by `t`.
 
-A layer with a parent has its location relative to the parent (default `0,0,0`).
-A root-level layer defaults to the scene center.
+`[verified]` `t` is a fraction of `(endTime - startTime)` of the owning layer;
+`t` may be slightly negative.
 
-## Effects
+`[verified]` Converted to frames at the scene fps, keyframe times sit about
+half a frame after the frame boundary; recommended mapping:
+`frame = round(t * duration_ms * fps / 1000 - 0.5)`, clamped to >= 0.
 
-Effects appear as `<effect>` children of a layer, identified by an id string.
-Some effect definitions carry scripts or expressions: a converter must treat any
-such content as plain data and must **NEVER** execute it.
+`[verified]` The easing attribute `e` belongs to the keyframe the motion
+ARRIVES at. Our `.omproj` stores easing on the START keyframe, so the converter
+must shift it by one position after sorting. The first keyframe's `e` is
+irrelevant. `[assumed]` a missing `e` means linear.
 
-## Bookmarks
+Easing grammar `[verified]`: `"cubicBezier x1 y1 x2 y2"` (same order as CSS;
+y values may go outside 0..1, giving overshoot; about 70% of uses) and
+`"elastic p1 p2 p3 p4"` (four parameters, semantics UNKNOWN).
 
-Bookmarks (timeline markers) appear as `<bookmark t="ms" a="..."/>` in the scene.
-
-## Colors
+Parenting: a child's location is relative to its parent. `[verified]` with an
+unrotated, unscaled parent the child's world position is the sum of the
+locations. `[assumed/unknown]` the exact formula when the parent has rotation,
+scale or a pivot.
 
 Colors are `#AARRGGBB`.
 
-## Gaps between this and `.omproj` today
+## Effects
 
-To be scheduled later:
+`<effect id="com.alightcreative.…" locallyApplied hidden?>` with
+`<property name type value/>` children; types: `float`, `int`, `bool`, `vec2`,
+`vec3`, `color`, `quat`. A property can instead contain `<kf>` children
+(animated parameter). Effect ids seen with counts: lift 8, gaussianblur 6,
+solidcolor 5, invert 5, hueshift 4, motionblur4 3, texttransform 3, noise3 2,
+and one each of bendwarp, glow, softglow, lightglow, stripes, brightcont2,
+satvib, sharpen, inner-glow, exposure, repeat.grid, textprogress, extrude. A
+converter must treat all effect content as plain data and must NEVER execute
+anything from a file.
 
-- cubic-bezier and other easings
-- timeline markers
-- pivot/anchor
-- skew
-- parent/child layers
-- groups
-- trim/speed
-- effects
+## What OpenMotion needs before a faithful import
+
+Shapes (circle, rounded rect, path, gradient), blend modes and masks, parent
+hierarchy with pivot, cubic-bezier and elastic easing, compositions (precomps),
+text (with fonts), and clean-room implementations of the effects above. Until
+then the converter should import best-effort and print a report of everything
+it skipped.
+
+## Rules for this repository
+
+Do not commit exported files, images or text from other people's projects. Test
+fixtures are small hand-written XML files that mimic the structure.
