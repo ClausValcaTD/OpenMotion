@@ -33,7 +33,9 @@ struct Transform {
     Property x, y, scale_x, scale_y, rotation, opacity;
 };
 
-enum class LayerType { Solid, Rect, Text, Video, Image, Audio };
+// Circle and RoundRect are appended last so existing enumerator values and the
+// "type" strings of the earlier types never change.
+enum class LayerType { Solid, Rect, Text, Video, Image, Audio, Circle, RoundRect };
 
 // How a layer's colour is combined with what is already on the canvas.
 // Appended in this order so Normal stays 0: a default-constructed layer, and
@@ -50,7 +52,8 @@ struct Layer {
     std::string color;   // "#RRGGBB", used by Solid/Rect
     std::string text;    // used by Text
     std::string source;  // file path, used by Video/Image/Audio
-    double      width = 0, height = 0;  // used by Rect
+    double      width = 0, height = 0;  // used by Rect, Circle, RoundRect
+    double      radius = 0.0;           // corner radius in px, used by RoundRect
     int64_t     in_ms = 0;              // source offset, used by Audio
     double      volume = 1.0;           // 0..10, used by Audio
     BlendMode   blend = BlendMode::Normal;  // ignored by Audio

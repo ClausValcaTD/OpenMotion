@@ -74,6 +74,8 @@ std::optional<LayerType> layer_type_from_string(const std::string& text) {
     if (text == "video") return LayerType::Video;
     if (text == "image") return LayerType::Image;
     if (text == "audio") return LayerType::Audio;
+    if (text == "circle") return LayerType::Circle;
+    if (text == "round_rect") return LayerType::RoundRect;
     return std::nullopt;
 }
 
@@ -85,6 +87,8 @@ std::string layer_type_to_string(LayerType type) {
         case LayerType::Video: return "video";
         case LayerType::Image: return "image";
         case LayerType::Audio: return "audio";
+        case LayerType::Circle: return "circle";
+        case LayerType::RoundRect: return "round_rect";
     }
     return "solid";
 }
@@ -262,6 +266,11 @@ std::variant<Layer, ProjectError> layer_from_json(const json& node, std::size_t 
     layer.source = (node.contains("source") && node["source"].is_string()) ? node["source"].get<std::string>() : "";
     layer.width = number_field(node, "width").value_or(0.0);
     layer.height = number_field(node, "height").value_or(0.0);
+    layer.radius = number_field(node, "radius").value_or(0.0);
+    // 1e400 parses as infinity, so the finiteness check is what rejects it.
+    if (!std::isfinite(layer.radius) || layer.radius < 0.0) {
+        return ProjectError{context + ": radius must be finite and not negative"};
+    }
     const double in_ms = number_field(node, "in_ms").value_or(0.0);
     if (!fits_int64(in_ms)) {
         return ProjectError{context + ": in_ms is out of range"};
@@ -427,6 +436,11 @@ json layer_to_json(const Layer& layer) {
     if (layer.type == LayerType::Audio) {
         node["in_ms"] = layer.in_ms;
         node["volume"] = layer.volume;
+    }
+    // "radius" only applies to round_rect layers; every other type omits it so
+    // its JSON stays byte-identical.
+    if (layer.type == LayerType::RoundRect) {
+        node["radius"] = layer.radius;
     }
     // "blend" is written only when it is not the default, so a layer without a
     // blend mode serializes exactly as it did before the field existed.

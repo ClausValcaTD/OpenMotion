@@ -45,11 +45,12 @@ Each element of `layers` is an object. Layers are drawn bottom to top, so the
 | `start_ms` | number | no | `0` | Inclusive start time on the timeline. |
 | `end_ms` | number | no | `0` | Exclusive end time. Must be `>= start_ms`. |
 | `transform` | object | no | see below | Animated transform. |
-| `color` | string | no | `""` | `"#RRGGBB"`, used by `solid` and `rect`. |
+| `color` | string | no | `""` | `"#RRGGBB"`, used by `solid`, `rect`, `circle` and `round_rect`. |
 | `text` | string | no | `""` | Reserved for `text` layers (not rendered yet). |
 | `source` | string | no | `""` | File path, used by `image`, `video` and `audio`. |
-| `width` | number | no | `0` | Used by `rect`, and as an explicit size override for `image`/`video`. |
+| `width` | number | no | `0` | Used by `rect`, `circle`, `round_rect`, and as an explicit size override for `image`/`video`. |
 | `height` | number | no | `0` | As above. |
+| `radius` | number | no | `0.0` | **RoundRect only.** Corner radius in pixels. Must be finite and `>= 0`. |
 | `in_ms` | number | no | `0` | **Audio only.** Offset into the source file. Must be `>= 0`. |
 | `volume` | number | no | `1.0` | **Audio only.** Linear gain, must be finite and within `0`–`10`. |
 | `blend` | string | no | `"normal"` | Blend mode. One of the names below. Ignored by `audio` layers. |
@@ -63,6 +64,8 @@ the top-level integers.
 |---|---|---|
 | `solid` | Full-canvas colour fill | `color`, `transform.opacity` |
 | `rect` | Rotated/scaled rectangle | `color`, `width`, `height`, `transform` |
+| `circle` | Ellipse inscribed in the `width` x `height` box | `color`, `width`, `height`, `transform` |
+| `round_rect` | Rectangle with rounded corners | `color`, `width`, `height`, `radius`, `transform` |
 | `text` | Text | *(parsed; not rendered yet)* |
 | `image` | Still image | `source`, `width`/`height` (optional override), `transform` |
 | `video` | Video clip | `source`, `width`/`height` (optional override), `transform` |
@@ -72,13 +75,19 @@ For `image` and `video` layers, if both `width` and `height` are greater than
 zero they override the decoded size; otherwise the source's native size is used.
 Transform, colour and size are ignored for `audio` layers.
 
+`circle` draws the ellipse inscribed in its `width` x `height` box. `round_rect`
+is a rectangle of that size with corners of radius `radius`; the radius is
+scaled with the layer (by the smaller of the two scale factors) and clamped to
+half the smaller side, so a large value yields a pill or circle. All four shape
+types are anti-aliased at their edges and composite through the blend path.
+
 ### Blend modes
 
 `blend` selects how a layer's colour is combined with what is already on the
-canvas below it. It applies to `solid`, `rect`, `image` and `video` layers;
-`audio` layers carry no pixels and ignore it. The canvas is always opaque, so
-for a pixel with effective alpha `a = opacity * coverage * texture alpha` the
-result is
+canvas below it. It applies to every drawn layer type (`solid`, `rect`,
+`circle`, `round_rect`, `image` and `video`); `audio` layers carry no pixels and
+ignore it. The canvas is always opaque, so for a pixel with effective alpha
+`a = opacity * coverage * texture alpha` the result is
 
 ```
 result = (1 - a) * cb + a * blend_channel(mode, cb, cs)
@@ -180,11 +189,12 @@ Alight Motion exports mostly use this easing (see `docs/AM_XML_NOTES.md`).
 `to_json_string` pretty-prints with an indent of 2 and `save_to_file` appends a
 trailing newline. The writer always emits every field of every layer — including
 `name`, `color`, `text`, `source`, `width` and `height` even when empty or zero —
-**except** `in_ms` and `volume`, which are written **only for `audio` layers**
-and omitted for every other type, and `blend`, which is written **only when it
-is not `normal`** and omitted otherwise. The transform is always written with
-all six properties; a property is written as a bare number when it has no
-keyframes, and as a `{"keyframes": [...]}` object otherwise.
+**except** `in_ms` and `volume`, which are written **only for `audio` layers**,
+`radius`, which is written **only for `round_rect` layers**, and `blend`, which
+is written **only when it is not `normal`**; each is omitted for every other
+case. The transform is always written with all six properties; a property is
+written as a bare number when it has no keyframes, and as a
+`{"keyframes": [...]}` object otherwise.
 
 The `bezier` array is written **only** for `cubic_bezier` keyframes. Every other
 easing serializes exactly as before this field existed, so existing files stay
@@ -207,6 +217,8 @@ round trip is stable: loading the saved file yields an equal project.
 - `start_ms`/`end_ms`/`in_ms` must be in range; `in_ms >= 0`.
 - `end_ms >= start_ms`.
 - `volume` must be finite and within `[0, 10]`.
+- `radius`, if present, must be finite and `>= 0` (a value like `1e400` parses as
+  infinity and is rejected).
 - `blend`, if present, must be a string naming a known blend mode.
 - A property must be a number or an object with a `keyframes` array.
 - Each keyframe must be an object with numeric `t` and `v`; `t` must be in range.

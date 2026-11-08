@@ -212,11 +212,10 @@ Quad make_quad(const Frame& frame, double center_x, double center_y, double widt
     return quad;
 }
 
-// Visits every canvas pixel near the transformed quad, passing the pixel centre
-// in the quad's unrotated local frame and its analytic edge coverage in [0,1].
-// Coverage is the product of the per-axis coverage of the two edges; it is 1
-// for interior pixels and falls to 0 within half a pixel outside the edge, so
-// rotated and scaled edges are anti-aliased without supersampling.
+// Visits every canvas pixel near the transformed quad, handing the callback the
+// pixel's centre in the quad's unrotated local frame (output-pixel units,
+// relative to the layer centre) and the half extents in output pixels. The
+// caller turns those into a coverage in [0,1].
 template <typename Fn>
 void for_each_quad_pixel(const Quad& quad, Fn&& visit) {
     for (int y = quad.y_begin; y < quad.y_end; ++y) {
@@ -225,26 +224,99 @@ void for_each_quad_pixel(const Quad& quad, Fn&& visit) {
             const double dy = (static_cast<double>(y) + 0.5) - quad.center_y;
             const double local_x = quad.cos_a * dx + quad.sin_a * dy;
             const double local_y = -quad.sin_a * dx + quad.cos_a * dy;
-            const double cov_x =
-                clamp_unit(quad.half_w_px - std::abs(local_x) + 0.5);
-            const double cov_y =
-                clamp_unit(quad.half_h_px - std::abs(local_y) + 0.5);
-            const double coverage = cov_x * cov_y;
-            if (coverage > 0.0) {
-                visit(x, y, local_x, local_y, coverage);
-            }
+            visit(x, y, local_x, local_y, quad.half_w_px, quad.half_h_px);
         }
     }
+}
+
+// Analytic axis-aligned box coverage: the product of the per-axis coverage of
+// the two edges, 1 for interior pixels and 0 within half a pixel outside.
+double rect_coverage(double local_x, double local_y, double hx, double hy) {
+    const double cov_x = clamp_unit(hx - std::abs(local_x) + 0.5);
+    const double cov_y = clamp_unit(hy - std::abs(local_y) + 0.5);
+    return cov_x * cov_y;
+}
+
+// Signed distance (negative inside) to an ellipse inscribed in the hx x hy box,
+// via the gradient-normalised first-order approximation. Degenerate extents
+// give a zero coverage.
+double circle_coverage(double local_x, double local_y, double hx, double hy) {
+    if (!(hx > 0.0) || !(hy > 0.0)) {
+        return 0.0;
+    }
+    const double k0 = std::sqrt((local_x / hx) * (local_x / hx) + (local_y / hy) * (local_y / hy));
+    const double gx = local_x / (hx * hx);
+    const double gy = local_y / (hy * hy);
+    const double k1 = std::sqrt(gx * gx + gy * gy);
+    const double d = (k1 > 0.0) ? k0 * (k0 - 1.0) / k1 : -std::min(hx, hy);
+    return clamp_unit(0.5 - d);
+}
+
+// Signed distance (negative inside) to a rounded box with corner radius
+// `radius` (already scaled), using the standard rounded-rect SDF.
+double round_rect_coverage(double local_x, double local_y, double hx, double hy, double radius) {
+    if (!(hx > 0.0) || !(hy > 0.0)) {
+        return 0.0;
+    }
+    const double r = std::min(radius, std::min(hx, hy));
+    const double qx = std::abs(local_x) - hx + r;
+    const double qy = std::abs(local_y) - hy + r;
+    const double outside = std::sqrt(std::max(qx, 0.0) * std::max(qx, 0.0) +
+                                     std::max(qy, 0.0) * std::max(qy, 0.0));
+    const double inside = std::min(std::max(qx, qy), 0.0);
+    const double d = outside + inside - r;
+    return clamp_unit(0.5 - d);
+}
+
+// Rasterizes a filled shape whose coverage the caller derives from the local
+// coordinates and half extents, then composites through the blend path.
+template <typename Coverage>
+void draw_shape(Frame& frame, double center_x, double center_y, double width, double height,
+                double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
+                uint8_t blue, double alpha, project::BlendMode mode, Coverage&& coverage_fn) {
+    const Quad quad =
+        make_quad(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg);
+    for_each_quad_pixel(quad, [&](int x, int y, double local_x, double local_y, double hx,
+                                  double hy) {
+        const double coverage = coverage_fn(local_x, local_y, hx, hy);
+        if (coverage > 0.0) {
+            blend_pixel(frame, x, y, red, green, blue, alpha * coverage, mode);
+        }
+    });
 }
 
 void draw_rect(Frame& frame, double center_x, double center_y, double width, double height,
                double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
                uint8_t blue, double alpha, project::BlendMode mode) {
-    const Quad quad =
-        make_quad(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg);
-    for_each_quad_pixel(quad, [&](int x, int y, double, double, double coverage) {
-        blend_pixel(frame, x, y, red, green, blue, alpha * coverage, mode);
-    });
+    draw_shape(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg, red, green,
+               blue, alpha, mode,
+               [](double local_x, double local_y, double hx, double hy) {
+                   return rect_coverage(local_x, local_y, hx, hy);
+               });
+}
+
+void draw_circle(Frame& frame, double center_x, double center_y, double width, double height,
+                 double scale_x, double scale_y, double rotation_deg, uint8_t red, uint8_t green,
+                 uint8_t blue, double alpha, project::BlendMode mode) {
+    draw_shape(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg, red, green,
+               blue, alpha, mode,
+               [](double local_x, double local_y, double hx, double hy) {
+                   return circle_coverage(local_x, local_y, hx, hy);
+               });
+}
+
+void draw_round_rect(Frame& frame, double center_x, double center_y, double width, double height,
+                     double scale_x, double scale_y, double rotation_deg, double radius,
+                     uint8_t red, uint8_t green, uint8_t blue, double alpha,
+                     project::BlendMode mode) {
+    // The radius scales with the layer, using the smaller axis so the corners
+    // stay circular under a non-uniform scale.
+    const double scaled_radius = radius * std::min(std::abs(scale_x), std::abs(scale_y));
+    draw_shape(frame, center_x, center_y, width, height, scale_x, scale_y, rotation_deg, red, green,
+               blue, alpha, mode,
+               [scaled_radius](double local_x, double local_y, double hx, double hy) {
+                   return round_rect_coverage(local_x, local_y, hx, hy, scaled_radius);
+               });
 }
 
 int clamp_texel(double value, int dimension) {
@@ -349,7 +421,12 @@ void draw_image(Frame& frame, const Texture& texture, double center_x, double ce
     if (quad.half_w == 0.0 || quad.half_h == 0.0) {
         return;
     }
-    for_each_quad_pixel(quad, [&](int x, int y, double local_x, double local_y, double coverage) {
+    for_each_quad_pixel(quad, [&](int x, int y, double local_x, double local_y, double hx,
+                                  double hy) {
+        const double coverage = rect_coverage(local_x, local_y, hx, hy);
+        if (coverage <= 0.0) {
+            return;
+        }
         const double u = (local_x + quad.half_w) / (2.0 * quad.half_w);
         const double v = (local_y + quad.half_h) / (2.0 * quad.half_h);
         const Sample sample =
@@ -576,7 +653,11 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             continue;
         }
 
-        if (layer.type != project::LayerType::Solid && layer.type != project::LayerType::Rect) {
+        const bool is_solid = layer.type == project::LayerType::Solid;
+        const bool is_rect = layer.type == project::LayerType::Rect;
+        const bool is_circle = layer.type == project::LayerType::Circle;
+        const bool is_round_rect = layer.type == project::LayerType::RoundRect;
+        if (!is_solid && !is_rect && !is_circle && !is_round_rect) {
             continue;  // text layers are not rendered yet
         }
 
@@ -585,11 +666,22 @@ std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t
             return RenderError{"invalid color '" + layer.color + "' on layer " + layer.id};
         }
 
-        if (layer.type == project::LayerType::Solid) {
+        if (is_solid) {
             draw_solid(frame, red, green, blue, alpha, layer.blend);
         } else if (layer.width > 0.0 && layer.height > 0.0) {
-            draw_rect(frame, transform.x, transform.y, layer.width, layer.height, transform.scale_x,
-                      transform.scale_y, transform.rotation, red, green, blue, alpha, layer.blend);
+            if (is_circle) {
+                draw_circle(frame, transform.x, transform.y, layer.width, layer.height,
+                            transform.scale_x, transform.scale_y, transform.rotation, red, green,
+                            blue, alpha, layer.blend);
+            } else if (is_round_rect) {
+                draw_round_rect(frame, transform.x, transform.y, layer.width, layer.height,
+                                transform.scale_x, transform.scale_y, transform.rotation,
+                                layer.radius, red, green, blue, alpha, layer.blend);
+            } else {
+                draw_rect(frame, transform.x, transform.y, layer.width, layer.height,
+                          transform.scale_x, transform.scale_y, transform.rotation, red, green, blue,
+                          alpha, layer.blend);
+            }
         }
     }
     return frame;
