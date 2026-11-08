@@ -31,6 +31,12 @@ Keyframe make_keyframe(int64_t time_ms, double value, Easing easing) {
     return Keyframe{time_ms, value, easing};
 }
 
+Keyframe make_bezier_keyframe(int64_t time_ms, double value, double x1, double y1, double x2, double y2) {
+    Keyframe keyframe{time_ms, value, Easing::CubicBezier};
+    keyframe.bezier = {x1, y1, x2, y2};
+    return keyframe;
+}
+
 // Defaults matching the project.hpp loader: x=y=rotation=0, scale=1, opacity=1.
 Transform make_default_transform() {
     Transform transform;
@@ -57,6 +63,113 @@ TEST_CASE("apply_easing endpoints, shape and clamping", "[keyframe]") {
     CHECK(keyframe::apply_easing(Easing::Linear, 2.0) == Approx(1.0));
     CHECK(keyframe::apply_easing(Easing::Hold, -1.0) == Approx(0.0));
     CHECK(keyframe::apply_easing(Easing::Hold, 2.0) == Approx(1.0));
+}
+
+TEST_CASE("cubic_bezier_ease matches the identity and reference curves", "[keyframe]") {
+    SECTION("identity curve (0,0,1,1) equals u") {
+        for (int i = 0; i <= 20; ++i) {
+            const double u = static_cast<double>(i) / 20.0;
+            CHECK(keyframe::cubic_bezier_ease(0.0, 0.0, 1.0, 1.0, u) == Approx(u).margin(1e-6));
+        }
+    }
+
+    SECTION("ease-in-out curve (0.42,0,0.58,1) is 0.5 at u = 0.5") {
+        CHECK(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 0.5) == Approx(0.5).margin(1e-6));
+    }
+
+    SECTION("a symmetric curve satisfies f(u) + f(1-u) = 1") {
+        for (int i = 0; i <= 20; ++i) {
+            const double u = static_cast<double>(i) / 20.0;
+            const double forward = keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, u);
+            const double backward = keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 1.0 - u);
+            CHECK(forward + backward == Approx(1.0).margin(1e-6));
+        }
+    }
+
+    SECTION("endpoints are exactly 0 and 1") {
+        CHECK(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 0.0) == 0.0);
+        CHECK(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 1.0) == 1.0);
+        CHECK(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, -3.0) == 0.0);
+        CHECK(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 7.0) == 1.0);
+    }
+
+    SECTION("NaN progress maps to 0") {
+        CHECK(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, std::nan("")) == 0.0);
+    }
+
+    SECTION("overshooting y control points leave 0..1 but stay finite") {
+        bool below_zero = false;
+        bool above_one = false;
+        for (int i = 0; i <= 200; ++i) {
+            const double u = static_cast<double>(i) / 200.0;
+            const double value = keyframe::cubic_bezier_ease(0.25, -1.5, 0.75, 1.5, u);
+            CHECK(std::isfinite(value));
+            if (value < 0.0) below_zero = true;
+            if (value > 1.0) above_one = true;
+        }
+        CHECK(below_zero);
+        CHECK(above_one);
+    }
+
+    SECTION("degenerate control points stay finite") {
+        for (int i = 0; i <= 20; ++i) {
+            const double u = static_cast<double>(i) / 20.0;
+            CHECK(std::isfinite(keyframe::cubic_bezier_ease(0.0, 0.0, 0.0, 0.0, u)));
+            CHECK(std::isfinite(keyframe::cubic_bezier_ease(1.0, 1.0, 1.0, 1.0, u)));
+        }
+    }
+
+    SECTION("monotonic non-decreasing when x and y stay within 0..1") {
+        double previous = -1.0;
+        for (int i = 0; i <= 200; ++i) {
+            const double u = static_cast<double>(i) / 200.0;
+            const double value = keyframe::cubic_bezier_ease(0.25, 0.1, 0.75, 0.9, u);
+            CHECK(value >= previous - 1e-9);
+            previous = value;
+        }
+    }
+}
+
+TEST_CASE("apply_easing overloads handle cubic_bezier", "[keyframe]") {
+    SECTION("the Easing overload has no control points, so it stays linear") {
+        CHECK(keyframe::apply_easing(Easing::CubicBezier, 0.25) == Approx(0.25));
+        CHECK(keyframe::apply_easing(Easing::CubicBezier, 0.75) == Approx(0.75));
+        CHECK(keyframe::apply_easing(Easing::CubicBezier, 0.0) == Approx(0.0));
+        CHECK(keyframe::apply_easing(Easing::CubicBezier, 1.0) == Approx(1.0));
+    }
+
+    SECTION("the Keyframe overload uses the stored control points") {
+        const Keyframe keyframe = make_bezier_keyframe(0, 0.0, 0.42, 0.0, 0.58, 1.0);
+        CHECK(keyframe::apply_easing(keyframe, 0.5) ==
+              Approx(keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 0.5)));
+    }
+
+    SECTION("non-bezier keyframes fall back to the Easing overload") {
+        const Keyframe keyframe = make_keyframe(0, 0.0, Easing::EaseIn);
+        CHECK(keyframe::apply_easing(keyframe, 0.5) == Approx(0.125));
+    }
+}
+
+TEST_CASE("evaluate shapes a segment with cubic_bezier easing", "[keyframe]") {
+    Property property;
+    property.keyframes = {make_bezier_keyframe(0, 0.0, 0.42, 0.0, 0.58, 1.0),
+                          make_keyframe(1000, 100.0, Easing::Linear)};
+
+    // Midpoint of the segment: lerp(0, 100, cubic_bezier_ease(0.42,0,0.58,1, 0.5)).
+    const double eased = keyframe::cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, 0.5);
+    CHECK(keyframe::evaluate(property, 500) == Approx(0.0 + 100.0 * eased));
+
+    // A non-symmetric curve must move the midpoint away from a linear ramp.
+    Property asymmetric;
+    asymmetric.keyframes = {make_bezier_keyframe(0, 0.0, 0.9, 0.0, 1.0, 0.1),
+                            make_keyframe(1000, 100.0, Easing::Linear)};
+    CHECK(keyframe::evaluate(asymmetric, 500) != Approx(50.0));
+    CHECK(keyframe::evaluate(asymmetric, 500) ==
+          Approx(100.0 * keyframe::cubic_bezier_ease(0.9, 0.0, 1.0, 0.1, 0.5)));
+
+    // The keyframes bounding the segment are still exact.
+    CHECK(keyframe::evaluate(property, 0) == Approx(0.0));
+    CHECK(keyframe::evaluate(property, 1000) == Approx(100.0));
 }
 
 TEST_CASE("evaluate covers constants, bounds, keyframes and segments", "[keyframe]") {

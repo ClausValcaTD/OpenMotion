@@ -116,6 +116,7 @@ A property is either a **constant** or an **animated track**:
 | `t` | number | yes | — | Time in milliseconds. Must be integer-valued and in range. |
 | `v` | number | yes | — | Value at that time. |
 | `easing` | string | no | `"linear"` | The easing of the segment **starting** at this keyframe. |
+| `bezier` | array of 4 numbers | see below | `[0, 0, 1, 1]` | CSS cubic-bezier control points `[x1, y1, x2, y2]`. Required when `easing` is `"cubic_bezier"`, ignored otherwise. |
 
 Keyframes must be **sorted by `t`** (non-decreasing); out-of-order keyframes are
 an error. Two keyframes may share the same `t`; the evaluator then holds the
@@ -132,9 +133,17 @@ earlier value for that zero-length span.
 | `ease_out` | `1 − (1 − t)³` |
 | `ease_in_out` | `4t³` for `t < 0.5`, else `1 − (−2t + 2)³ / 2` |
 | `hold` | step: `0` until `t = 1`, then `1` |
+| `cubic_bezier` | a CSS `cubic-bezier(x1, y1, x2, y2)` curve from the `bezier` array |
 
 An unknown easing string is an error. The easing on a keyframe governs the
 segment from that keyframe to the next one.
+
+`cubic_bezier` reproduces CSS `cubic-bezier()`. The four numbers are the two
+control points `x1 y1 x2 y2`, in the same order as CSS. `x1` and `x2` must be
+within `[0, 1]`; `y1` and `y2` may leave `[0, 1]` (that is what produces an
+overshoot), up to an absolute value of `10`. Evaluation solves the curve for
+the time progress `u` and returns the eased value, which is **not** clamped.
+Alight Motion exports mostly use this easing (see `docs/AM_XML_NOTES.md`).
 
 ## Serialization rules
 
@@ -145,6 +154,10 @@ trailing newline. The writer always emits every field of every layer — includi
 and omitted for every other type. The transform is always written with all six
 properties; a property is written as a bare number when it has no keyframes, and
 as a `{"keyframes": [...]}` object otherwise.
+
+The `bezier` array is written **only** for `cubic_bezier` keyframes. Every other
+easing serializes exactly as before this field existed, so existing files stay
+byte-identical on a load → save round trip.
 
 Because the writer always emits the full set of layer fields, a load → save
 round trip is stable: loading the saved file yields an equal project.
@@ -167,6 +180,10 @@ round trip is stable: loading the saved file yields an equal project.
 - Each keyframe must be an object with numeric `t` and `v`; `t` must be in range.
 - Keyframes must be sorted by `t`.
 - `easing`, if present, must be a known name.
+- A `cubic_bezier` keyframe must carry a `bezier` array of exactly four numbers.
+- `bezier` values must be finite; `x1` and `x2` must be within `[0, 1]`; `y1`
+  and `y2` must satisfy `|y| <= 10`.
+- `bezier` on a non-`cubic_bezier` keyframe is ignored (not an error).
 
 Malformed JSON is reported as a parse error; anything that throws internally is
 caught and turned into a `ProjectError`.

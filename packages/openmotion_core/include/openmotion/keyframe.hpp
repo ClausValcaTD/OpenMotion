@@ -14,14 +14,29 @@ namespace openmotion::keyframe {
 //   EaseOut:   1 - (1-t)^3
 //   EaseInOut: t < 0.5 ? 4*t^3 : 1 - ((-2*t + 2)^3) / 2
 //   Hold:      0 for t < 1, 1 only when t >= 1 (step function)
+//   CubicBezier: no control points are available in this signature, so it
+//                behaves as Linear (t). Use the Keyframe overload below.
 double apply_easing(project::Easing easing, double t);
+
+// Eases u through a CSS cubic-bezier(x1, y1, x2, y2) curve.
+//   u is the time progress. NaN -> 0; u <= 0 -> exactly 0; u >= 1 -> exactly 1.
+//   Otherwise the curve parameter s in [0,1] is solved from Bx(s) = u with
+//   Newton-Raphson (at most 8 iterations, bisection fallback when the
+//   derivative is tiny or Newton leaves [0,1]) and By(s) is returned.
+//   The result is NOT clamped, because y1/y2 may overshoot beyond [0,1].
+// Precision is about 1e-7.
+double cubic_bezier_ease(double x1, double y1, double x2, double y2, double u);
+
+// Applies the easing of a keyframe, using its bezier control points when its
+// easing is CubicBezier, and falling back to apply_easing(k.easing, t) otherwise.
+double apply_easing(const project::Keyframe& k, double t);
 
 // Value of a property at time t_ms.
 //  - No keyframes: return p.constant.
 //  - t_ms before the first keyframe: first keyframe's value.
 //  - t_ms at/after the last keyframe: last keyframe's value.
 //  - Otherwise find the segment [k0, k1] with k0.time_ms <= t_ms < k1.time_ms
-//    and return lerp(k0.value, k1.value, apply_easing(k0.easing, u))
+//    and return lerp(k0.value, k1.value, apply_easing(k0, u))
 //    where u = (t_ms - k0.time_ms) / (k1.time_ms - k0.time_ms).
 //    The easing of a segment is the easing stored on its START keyframe.
 //  - Two keyframes with equal time_ms must not divide by zero.
