@@ -191,8 +191,9 @@ frame-index/advance planning — is tested without any external tools.
   so a seek lands at or just before the target frame's presentation time. Seeks
   at or past the container duration are clamped to the last frame that can still
   be produced.
-- **No anti-aliasing.** Coverage is a hard pixel-centre test, so rotated and
-  scaled edges are aliased. Textures are bilinearly filtered; geometry is not.
+- **Analytic edge coverage.** Quad edges use an analytic coverage estimate (no
+  supersampling, no per-pixel allocation), so rotated and scaled edges are
+  anti-aliased. Textures are bilinearly filtered.
 - **Video layers are silent.** The video decode runs with `-an`; audio comes only
   from `audio` layers.
 - **No UI or preview.** The only entry point is the `om-render` CLI; there is no
