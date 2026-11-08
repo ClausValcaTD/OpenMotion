@@ -61,7 +61,9 @@ blend mode renders byte-identically to before the feature existed.
 builds the `ffmpeg` command, then writes each rendered frame to the `ffmpeg`
 child's standard input. The video is encoded with libx264 (`-preset veryfast
 -crf 18`, `+faststart`) when ffmpeg reports that encoder; otherwise the codec
-arguments are omitted and ffmpeg's default encoder is used.
+arguments are omitted and ffmpeg's default encoder is used. `build_video_filter_args`
+pins BT.709 limited-range yuv420p and re-asserts the colour tags with a trailing
+`setparams` filter, which is what keeps ffprobe reporting them on ffmpeg 7.1.x.
 
 ### `internal::audio_mix` — the audio filter graph
 

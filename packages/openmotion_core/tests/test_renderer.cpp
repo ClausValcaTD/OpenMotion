@@ -31,6 +31,7 @@ namespace openmotion::renderer {
 // Defined in src/renderer.cpp. Declared here because the public header is not
 // in scope for this task's changes.
 std::string build_video_codec_args(bool have_libx264);
+std::string build_video_filter_args();
 
 }  // namespace openmotion::renderer
 
@@ -746,6 +747,91 @@ TEST_CASE("build_video_codec_args reflects libx264 availability", "[renderer]") 
 
     // Without it, nothing is added so ffmpeg keeps its default encoder.
     CHECK(renderer::build_video_codec_args(false).empty());
+}
+
+TEST_CASE("build_video_filter_args carries the BT.709 tags and setparams", "[renderer]") {
+    // Pure: no ffmpeg required. The fragment must normalise to BT.709
+    // limited-range yuv420p, tag the stream on the command line, and re-assert
+    // the tags at the end of the filter chain via setparams (the fix that makes
+    // them survive ffmpeg 7.1.x). Both the scale and the tag options are part
+    // of the contract, so check each independently.
+    const std::string args = renderer::build_video_filter_args();
+
+    CHECK(args.find("-vf \"") != std::string::npos);
+    CHECK(args.find("scale=out_color_matrix=bt709:out_range=tv") != std::string::npos);
+    CHECK(args.find("format=yuv420p") != std::string::npos);
+    CHECK(args.find("setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv") !=
+          std::string::npos);
+    CHECK(args.find("-colorspace bt709") != std::string::npos);
+    CHECK(args.find("-color_primaries bt709") != std::string::npos);
+    CHECK(args.find("-color_trc bt709") != std::string::npos);
+    CHECK(args.find("-color_range tv") != std::string::npos);
+
+    // setparams must come after format=yuv420p, i.e. be the last filter, so the
+    // re-asserted tags are what the encoder sees.
+    const std::size_t format_at = args.find("format=yuv420p");
+    const std::size_t setparams_at = args.find("setparams=");
+    REQUIRE(format_at != std::string::npos);
+    REQUIRE(setparams_at != std::string::npos);
+    CHECK(setparams_at > format_at);
+
+    // The libx264 fragment is independent, so the fallback (no libx264) still
+    // gets the tags and can still run.
+    CHECK(args.find("libx264") == std::string::npos);
+}
+
+TEST_CASE("the BT.709 filter fragment tags output without libx264", "[renderer]") {
+    // The fallback path (no -c:v) must still tag what it can. This runs the
+    // pure filter fragment through a real ffmpeg encode with no encoder pinned,
+    // exactly as render_to_mp4 does when libx264 is unavailable, so a
+    // regression in the non-libx264 command construction is caught even when
+    // libx264 is present on the machine.
+    if (!command_available("ffmpeg") || !command_available("ffprobe")) {
+        SKIP("ffmpeg/ffprobe are not available");
+    }
+
+    // Drive ffmpeg directly with the pure filter fragment and no -c:v, exactly
+    // as render_to_mp4 does when libx264 is unavailable. A 2x2 raw RGBA input
+    // keeps this cheap and avoids depending on the renderer's frame timing.
+    const std::filesystem::path output =
+        std::filesystem::temp_directory_path() /
+        ("openmotion_bt709_nolibx264_" + std::to_string(::getpid()) + ".mp4");
+    const std::filesystem::path raw =
+        std::filesystem::temp_directory_path() /
+        ("openmotion_bt709_nolibx264_" + std::to_string(::getpid()) + ".rgba");
+
+    {
+        std::ofstream stream(raw, std::ios::binary);
+        REQUIRE(stream.good());
+        // 2x2 opaque blue-grey, 10 frames.
+        const unsigned char pixel[4] = {0x30, 0x50, 0xc0, 0xff};
+        for (int i = 0; i < 40; ++i) {
+            stream.write(reinterpret_cast<const char*>(pixel), 4);
+        }
+    }
+
+    const std::string command =
+        "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgba -s 2x2 -r 10 -i " +
+        openmotion::internal::shell_quote(raw.string()) + " -an " +
+        renderer::build_video_filter_args() + " " +
+        openmotion::internal::shell_quote(output.string());
+    REQUIRE(std::system(command.c_str()) == 0);
+
+    const std::string probe =
+        "ffprobe -v error -select_streams v:0 "
+        "-show_entries stream=color_space,color_primaries,color_transfer,color_range "
+        "-of default=noprint_wrappers=1 " +
+        openmotion::internal::shell_quote(output.string());
+    const std::string info = capture_command(probe);
+
+    std::error_code ignored;
+    std::filesystem::remove(output, ignored);
+    std::filesystem::remove(raw, ignored);
+
+    CHECK(info.find("color_space=bt709") != std::string::npos);
+    CHECK(info.find("color_primaries=bt709") != std::string::npos);
+    CHECK(info.find("color_transfer=bt709") != std::string::npos);
+    CHECK(info.find("color_range=tv") != std::string::npos);
 }
 
 TEST_CASE("render_to_mp4 encodes H.264 as yuv420p and keeps the BT.709 tags", "[renderer]") {
