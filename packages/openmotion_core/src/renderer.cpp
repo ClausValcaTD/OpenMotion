@@ -546,6 +546,22 @@ std::string build_video_codec_args(bool have_libx264) {
     return "";
 }
 
+std::string build_video_filter_args() {
+    // Normalises the canvas to BT.709 limited-range yuv420p and tags the
+    // stream. `setparams` re-asserts the colour tags at the very end of the
+    // chain: ffmpeg 7.1.x drops the -color_primaries/-color_trc command-line
+    // tags while encoding (ffprobe then reports "unknown"), whereas 7.0.x
+    // keeps them without it. Adding it is harmless on 7.0.x and is what makes
+    // the tags survive on 7.1.x, with or without libx264. The fragment is
+    // space-delimited so it splices cleanly between the other arguments.
+    return "-vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
+           "scale=out_color_matrix=bt709:out_range=tv,"
+           "format=yuv420p,"
+           "setparams=color_primaries=bt709:color_trc=bt709:"
+           "colorspace=bt709:range=tv\""
+           " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv";
+}
+
 std::variant<Frame, RenderError> render_frame(const project::Project& p, int64_t t_ms) {
     RenderCache cache;
     return render_frame(p, t_ms, cache);
@@ -744,15 +760,10 @@ std::optional<RenderError> render_to_mp4(const project::Project& p, const std::s
 
     if (audio_inputs.empty()) {
         // Unchanged silent path: no audio stream in the output.
-        command +=
-            " -an -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
-            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p\""
-            " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv ";
+        command += " -an " + build_video_filter_args() + " ";
     } else {
         command += " -filter_complex \"" + internal::build_audio_filter_graph(audio_inputs) +
-                   "\" -map 0:v -map \"[aout]\" -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2,"
-                   "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p\""
-                   " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv"
+                   "\" -map 0:v -map \"[aout]\" " + build_video_filter_args() +
                    " -c:a aac -b:a 192k -t " +
                    format_ms_as_seconds(p.duration_ms) + " ";
     }
