@@ -54,6 +54,7 @@ Each element of `layers` is an object. Layers are drawn bottom to top, so the
 | `in_ms` | number | no | `0` | **Audio only.** Offset into the source file. Must be `>= 0`. |
 | `volume` | number | no | `1.0` | **Audio only.** Linear gain, must be finite and within `0`–`10`. |
 | `blend` | string | no | `"normal"` | Blend mode. One of the names below. Ignored by `audio` layers. |
+| `gradient` | object | no | — | **`rect`, `circle` and `round_rect` only.** A linear gradient fill that replaces `color`. See below. |
 
 `start_ms` and `end_ms` are converted from numbers with the same range guard as
 the top-level integers.
@@ -63,9 +64,9 @@ the top-level integers.
 | `type` | Meaning | Fields it uses |
 |---|---|---|
 | `solid` | Full-canvas colour fill | `color`, `transform.opacity` |
-| `rect` | Rotated/scaled rectangle | `color`, `width`, `height`, `transform` |
-| `circle` | Ellipse inscribed in the `width` x `height` box | `color`, `width`, `height`, `transform` |
-| `round_rect` | Rectangle with rounded corners | `color`, `width`, `height`, `radius`, `transform` |
+| `rect` | Rotated/scaled rectangle | `color` or `gradient`, `width`, `height`, `transform` |
+| `circle` | Ellipse inscribed in the `width` x `height` box | `color` or `gradient`, `width`, `height`, `transform` |
+| `round_rect` | Rectangle with rounded corners | `color` or `gradient`, `width`, `height`, `radius`, `transform` |
 | `text` | Text | *(parsed; not rendered yet)* |
 | `image` | Still image | `source`, `width`/`height` (optional override), `transform` |
 | `video` | Video clip | `source`, `width`/`height` (optional override), `transform` |
@@ -80,6 +81,7 @@ is a rectangle of that size with corners of radius `radius`; the radius is
 scaled with the layer (by the smaller of the two scale factors) and clamped to
 half the smaller side, so a large value yields a pill or circle. All four shape
 types are anti-aliased at their edges and composite through the blend path.
+`rect`, `circle` and `round_rect` may carry a `gradient` in place of `color`.
 
 ### Blend modes
 
@@ -109,6 +111,42 @@ result and is byte-for-byte identical to a render with no blend field at all.
 
 Every result is clamped to `[0, 1]`; a NaN input returns `cb`. An unknown blend
 name is an error.
+
+### Gradient object
+
+`gradient` gives a `rect`, `circle` or `round_rect` a linear gradient fill. It
+is allowed **only** on those three types; on any other layer it is an error.
+When present it **replaces** `color` for the fill — the `color` string is
+ignored (and not parsed).
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `start_color` | string | yes | — | `"#RRGGBB"` or `"#RRGGBBAA"`, hex digits only. |
+| `end_color` | string | yes | — | As above. |
+| `start` | array of 2 numbers | no | `[0.0, 0.0]` | Ramp start, in the layer's normalized box. |
+| `end` | array of 2 numbers | no | `[1.0, 0.0]` | Ramp end, in the layer's normalized box. |
+
+`start`/`end` are coordinates in the layer's **unscaled** `width` x `height`
+box: `(0, 0)` is the top-left corner and `(1, 1)` the bottom-right. Values
+outside `0..1` are allowed (they push the ramp beyond the box, so the visible
+part is a slice of it). Because the box is the layer's own box, the gradient
+scales and rotates with the layer; a mirroring (negative) scale is **not**
+reflected — the ramp always runs in the layer's local box coordinates. The
+colors are interpolated in premultiplied RGBA with 8-bit sRGB channel values and
+**no gamma conversion**.
+
+Rendering, per covered pixel: the shape's local coordinates (output pixels,
+relative to the layer centre after inverse rotation) map to box coordinates
+`bx = px / (2*hx) + 0.5` and `by = py / (2*hy) + 0.5`, and the ramp parameter is
+
+```
+t = clamp(dot(b - start, end - start) / |end - start|^2, 0, 1)
+```
+
+(if `|end - start|^2` is below `1e-12`, `t = 0`). The gradient's alpha
+multiplies into the effective alpha, so
+`a = opacity * coverage * gradient_alpha`, and the blend mode (if any) still
+applies with the gradient colour as the source colour.
 
 ### Transform object
 
@@ -190,9 +228,10 @@ Alight Motion exports mostly use this easing (see `docs/AM_XML_NOTES.md`).
 trailing newline. The writer always emits every field of every layer — including
 `name`, `color`, `text`, `source`, `width` and `height` even when empty or zero —
 **except** `in_ms` and `volume`, which are written **only for `audio` layers**,
-`radius`, which is written **only for `round_rect` layers**, and `blend`, which
-is written **only when it is not `normal`**; each is omitted for every other
-case. The transform is always written with all six properties; a property is
+`radius`, which is written **only for `round_rect` layers**, `blend`, which
+is written **only when it is not `normal`**, and `gradient`, which is written
+**only when present**; each is omitted for every other case. The transform is
+always written with all six properties; a property is
 written as a bare number when it has no keyframes, and as a
 `{"keyframes": [...]}` object otherwise.
 
@@ -220,6 +259,13 @@ round trip is stable: loading the saved file yields an equal project.
 - `radius`, if present, must be finite and `>= 0` (a value like `1e400` parses as
   infinity and is rejected).
 - `blend`, if present, must be a string naming a known blend mode.
+- `gradient`, if present, must be an object, and is allowed only on `rect`,
+  `circle` and `round_rect` layers.
+- `gradient.start_color` and `gradient.end_color` must be strings matching
+  `#RRGGBB` or `#RRGGBBAA` with hex digits only.
+- `gradient.start` and `gradient.end`, if present, must be arrays of exactly two
+  finite numbers, each with magnitude `<= 1000` (a value like `1e400` parses as
+  infinity and is rejected).
 - A property must be a number or an object with a `keyframes` array.
 - Each keyframe must be an object with numeric `t` and `v`; `t` must be in range.
 - Keyframes must be sorted by `t`.

@@ -22,8 +22,9 @@ one Catch2 executable, `openmotion_tests`, registered with CTest.
 ### `project` — the `.omproj` model
 
 `include/openmotion/project.hpp` and `src/project.cpp`. Defines the in-memory
-model (`Project`, `Layer`, `Transform`, `Property`, `Keyframe`, the `Easing` and
-`LayerType` enums) and the JSON reader/writer. `load_from_string`,
+model (`Project`, `Layer`, `Transform`, `Property`, `Keyframe`, `Gradient`, the
+`Easing`, `LayerType` and `BlendMode` enums) and the JSON reader/writer.
+`load_from_string`,
 `load_from_file`, `to_json_string` and `save_to_file` are the public entry
 points. Parsing is defensive: bad input becomes a `ProjectError`, never an
 exception that escapes. See [`OMPROJ_FORMAT.md`](OMPROJ_FORMAT.md) for the format
@@ -63,6 +64,14 @@ Every drawn pixel is composited with its layer's `blend` mode (see
 alpha`, and the result is `(1 - a) * cb + a * blend_channel(mode, cb, cs)` per
 channel. `Normal` keeps the original source-over formula, so a project without a
 blend mode renders byte-identically to before the feature existed.
+
+`rect`, `circle` and `round_rect` layers may carry a `gradient` in place of
+`color`. The endpoints are resolved once per layer per frame
+(`make_gradient_fill`), then each covered pixel maps its local coordinates to the
+layer's normalized box (`bx = px / (2*hx) + 0.5`, likewise `by`) and samples the
+ramp there (`gradient_at`). Interpolation is premultiplied RGBA with no gamma
+conversion, and the sampled alpha folds into the effective alpha, so the blend
+path is unchanged. Nothing is parsed or allocated per pixel.
 
 `render_to_mp4` validates the project, collects and validates audio layers,
 builds the `ffmpeg` command, then writes each rendered frame to the `ffmpeg`
@@ -148,6 +157,7 @@ Project model  ──►  keyframe::evaluate_transform / is_layer_active
 renderer::render_frame  (software rasterizer, per frame)
    │   ├── solid: full-canvas colour fill
    │   ├── rect / circle / round_rect: anti-aliased shapes in a rotated quad
+   │   │        (optionally a linear gradient fill instead of a flat colour)
    │   ├── image: image_loader::load_image  (ffprobe + ffmpeg, cached)
    │   └── video: video_stream::VideoStream (long-lived ffmpeg, cached)
    ▼

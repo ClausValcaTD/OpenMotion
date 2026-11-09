@@ -67,6 +67,24 @@ std::string blend_mode_to_string(BlendMode mode) {
     return "normal";
 }
 
+// True when `text` is "#RRGGBB" or "#RRGGBBAA" with hex digits only.
+bool is_valid_gradient_color(const std::string& text) {
+    if (text.size() != 7 && text.size() != 9) {
+        return false;
+    }
+    if (text[0] != '#') {
+        return false;
+    }
+    for (std::size_t i = 1; i < text.size(); ++i) {
+        const char c = text[i];
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<LayerType> layer_type_from_string(const std::string& text) {
     if (text == "solid") return LayerType::Solid;
     if (text == "rect") return LayerType::Rect;
@@ -231,6 +249,68 @@ std::variant<Transform, ProjectError> transform_from_json(const json& node,
     return transform;
 }
 
+// Reads one normalized [x, y] pair. Requires exactly two finite numbers whose
+// magnitude is within 1000 (so 1e400, which parses as infinity, is rejected).
+std::variant<std::array<double, 2>, ProjectError> point_from_json(const json& node,
+                                                                  const std::string& context,
+                                                                  const char* key) {
+    if (!node.is_array() || node.size() != 2) {
+        return ProjectError{context + ": gradient '" + key + "' must be an array of 2 numbers"};
+    }
+    std::array<double, 2> point{};
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (!node[i].is_number()) {
+            return ProjectError{context + ": gradient '" + key + "' must be an array of 2 numbers"};
+        }
+        const double value = node[i].get<double>();
+        if (!std::isfinite(value) || std::abs(value) > 1000.0) {
+            return ProjectError{context + ": gradient '" + key + "' values must be finite and within [-1000, 1000]"};
+        }
+        point[i] = value;
+    }
+    return point;
+}
+
+std::variant<Gradient, ProjectError> gradient_from_json(const json& node,
+                                                        const std::string& context) {
+    if (!node.is_object()) {
+        return ProjectError{context + ": 'gradient' must be an object"};
+    }
+    Gradient gradient;
+    if (!node.contains("start_color") || !node["start_color"].is_string()) {
+        return ProjectError{context + ": gradient 'start_color' must be a string"};
+    }
+    gradient.start_color = node["start_color"].get<std::string>();
+    if (!is_valid_gradient_color(gradient.start_color)) {
+        return ProjectError{context + ": gradient 'start_color' must be #RRGGBB or #RRGGBBAA"};
+    }
+    if (!node.contains("end_color") || !node["end_color"].is_string()) {
+        return ProjectError{context + ": gradient 'end_color' must be a string"};
+    }
+    gradient.end_color = node["end_color"].get<std::string>();
+    if (!is_valid_gradient_color(gradient.end_color)) {
+        return ProjectError{context + ": gradient 'end_color' must be #RRGGBB or #RRGGBBAA"};
+    }
+
+    if (node.contains("start")) {
+        std::variant<std::array<double, 2>, ProjectError> start =
+            point_from_json(node["start"], context, "start");
+        if (const auto* error = std::get_if<ProjectError>(&start)) {
+            return *error;
+        }
+        gradient.start = std::get<std::array<double, 2>>(start);
+    }
+    if (node.contains("end")) {
+        std::variant<std::array<double, 2>, ProjectError> end =
+            point_from_json(node["end"], context, "end");
+        if (const auto* error = std::get_if<ProjectError>(&end)) {
+            return *error;
+        }
+        gradient.end = std::get<std::array<double, 2>>(end);
+    }
+    return gradient;
+}
+
 std::variant<Layer, ProjectError> layer_from_json(const json& node, std::size_t index) {
     if (!node.is_object()) {
         return ProjectError{"layer " + std::to_string(index) + ": must be an object"};
@@ -300,6 +380,20 @@ std::variant<Layer, ProjectError> layer_from_json(const json& node, std::size_t 
                                 node["blend"].get<std::string>() + "'"};
         }
         layer.blend = *blend;
+    }
+
+    // A gradient fill is only meaningful for the filled shapes; on any other
+    // layer type it is an error rather than silently ignored.
+    if (node.contains("gradient")) {
+        if (layer.type != LayerType::Rect && layer.type != LayerType::Circle &&
+            layer.type != LayerType::RoundRect) {
+            return ProjectError{context + ": 'gradient' is only allowed on rect, circle or round_rect layers"};
+        }
+        std::variant<Gradient, ProjectError> gradient = gradient_from_json(node["gradient"], context);
+        if (const auto* error = std::get_if<ProjectError>(&gradient)) {
+            return *error;
+        }
+        layer.gradient = std::get<Gradient>(gradient);
     }
 
     if (node.contains("transform")) {
@@ -446,6 +540,16 @@ json layer_to_json(const Layer& layer) {
     // blend mode serializes exactly as it did before the field existed.
     if (layer.blend != BlendMode::Normal) {
         node["blend"] = blend_mode_to_string(layer.blend);
+    }
+    // "gradient" is written only when present, keeping every other layer's JSON
+    // byte-identical.
+    if (layer.gradient.has_value()) {
+        node["gradient"] = json{
+            {"start_color", layer.gradient->start_color},
+            {"end_color", layer.gradient->end_color},
+            {"start", layer.gradient->start},
+            {"end", layer.gradient->end},
+        };
     }
     return node;
 }
