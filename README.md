@@ -81,6 +81,7 @@ These are **not implemented** — listed so the roadmap is honest:
 | Language | C++17 |
 | Build | CMake |
 | JSON | [nlohmann/json](https://github.com/nlohmann/json) (fetched by CMake) |
+| XML | [pugixml](https://github.com/zeux/pugixml) v1.14, MIT (fetched by CMake) |
 | Tests | [Catch2 v3](https://github.com/catchorg/Catch2) (fetched by CMake) |
 | Media | External `ffmpeg` and `ffprobe` executables |
 | License | GPL v3 |

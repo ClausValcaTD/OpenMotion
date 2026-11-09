@@ -14,8 +14,12 @@ produce an MP4. Images, video and audio are all accessed by running the external
 link against FFmpeg.
 
 The build is CMake. The library target is `openmotion_core` (aliased
-`OpenMotion::openmotion_core`), the CLI target is `om-render`, and the tests are
-one Catch2 executable, `openmotion_tests`, registered with CTest.
+`OpenMotion::openmotion_core`), the CLI targets are `om-render` and
+`om-import-am`, and the tests are one Catch2 executable, `openmotion_tests`,
+registered with CTest. Dependencies (`nlohmann/json`, `Catch2` and, for the
+importer, `pugixml`) are fetched by CMake's `FetchContent`; `pugixml` is pinned
+to the v1.14 release tag and built as a system include so the project's warning
+flags do not apply to it.
 
 ## Module map
 
@@ -139,6 +143,20 @@ sets the render cache's base directory to the input file's directory (so
 relative `source` paths resolve next to the project), calls `render_to_mp4`, and
 prints the frame count or an error.
 
+### `am_import` — the Alight Motion XML importer
+
+`include/openmotion/am_import.hpp` and `src/am_import.cpp`, plus the
+`om-import-am` CLI (`tools/om_import_am.cpp`). Reads an Alight Motion `<scene>`
+export with pugixml and maps what it understands onto a `project::Project`,
+best-effort: unsupported layers and attributes are reported in an
+`ImportReport` (a list of `Issue` records, each `Info`, `Warning` or `Skipped`)
+instead of failing the whole import. `import_am_xml` and `import_am_file`
+return `std::variant<ImportResult, ImportError>` and never throw; the source
+XML is treated as untrusted data and nothing from it is executed, evaluated or
+loaded. The produced project is validated by a `to_json_string` +
+`load_from_string` round trip before it is returned. The mapping rules and the
+source structure are documented in [`AM_XML_NOTES.md`](AM_XML_NOTES.md).
+
 ### `compositor` and `effects` — placeholders
 
 `include/openmotion/compositor.hpp` and `include/openmotion/effects.hpp` declare
@@ -148,6 +166,11 @@ else. They exist to reserve the module names. Effects are Planned.
 ## Data flow
 
 ```
+Alight Motion XML ──► am_import::import_am_file ──► ImportReport (issues)
+   │                       │  (mapping rules in AM_XML_NOTES.md)
+   │                       ▼
+   │                  Project model ──► project::save_to_file ──► .omproj
+   │
 .omproj (JSON)
    │  project::load_from_file
    ▼
@@ -199,9 +222,10 @@ mixed audio stream.
 
 The tests live in `packages/openmotion_core/tests/`, one file per area:
 `test_project.cpp`, `test_keyframe.cpp`, `test_media.cpp`, `test_renderer.cpp`,
-`test_blend.cpp`, `test_video_layers.cpp` and `test_audio.cpp`. They are one
-Catch2 executable discovered by CTest, so each `TEST_CASE` runs as its own CTest
-test.
+`test_blend.cpp`, `test_am_import.cpp`, `test_video_layers.cpp` and
+`test_audio.cpp`. They are one Catch2 executable discovered by CTest, so each
+`TEST_CASE` runs as its own CTest test. `test_am_import.cpp` uses hand-written
+inline XML only; it never reads an exported Alight Motion file.
 
 Tests that need the media tools call `command_available("ffmpeg")` /
 `command_available("ffprobe")` first and `SKIP(...)` when the tools are absent,

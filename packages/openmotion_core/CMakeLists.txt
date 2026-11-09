@@ -27,7 +27,21 @@ FetchContent_Declare(Catch2
     GIT_TAG v3.8.1
     GIT_SHALLOW TRUE)
 
-FetchContent_MakeAvailable(nlohmann_json Catch2)
+# pugixml (MIT) powers the Alight Motion XML importer. Pinned to the v1.14
+# release tag; SYSTEM/EXCLUDE_FROM_ALL keep our warning flags off it.
+FetchContent_Declare(pugixml
+    GIT_REPOSITORY https://github.com/zeux/pugixml.git
+    GIT_TAG v1.14
+    GIT_SHALLOW TRUE)
+
+FetchContent_MakeAvailable(nlohmann_json Catch2 pugixml)
+
+set_target_properties(pugixml PROPERTIES EXCLUDE_FROM_ALL TRUE)
+get_target_property(_pugixml_include_dirs pugixml INTERFACE_INCLUDE_DIRECTORIES)
+if(_pugixml_include_dirs)
+    set_target_properties(pugixml PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+                                              "${_pugixml_include_dirs}")
+endif()
 
 add_library(openmotion_core STATIC
     src/media.cpp
@@ -38,6 +52,7 @@ add_library(openmotion_core STATIC
     src/keyframe.cpp
     src/compositor.cpp
     src/effects.cpp
+    src/am_import.cpp
     src/project.cpp)
 
 add_library(OpenMotion::openmotion_core ALIAS openmotion_core)
@@ -50,7 +65,8 @@ target_include_directories(openmotion_core
 
 target_link_libraries(openmotion_core
     PRIVATE
-        nlohmann_json::nlohmann_json)
+        nlohmann_json::nlohmann_json
+        pugixml::pugixml)
 
 target_compile_options(openmotion_core
     PRIVATE
@@ -89,6 +105,27 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             -fsanitize=address,undefined)
 endif()
 
+add_executable(om-import-am
+    tools/om_import_am.cpp)
+
+target_link_libraries(om-import-am
+    PRIVATE
+        OpenMotion::openmotion_core)
+
+target_compile_options(om-import-am
+    PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(om-import-am
+        PRIVATE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer)
+    target_link_options(om-import-am
+        PRIVATE
+            -fsanitize=address,undefined)
+endif()
+
 if(BUILD_TESTING)
     add_executable(openmotion_tests
         tests/test_media.cpp
@@ -96,12 +133,14 @@ if(BUILD_TESTING)
         tests/test_keyframe.cpp
         tests/test_renderer.cpp
         tests/test_blend.cpp
+        tests/test_am_import.cpp
         tests/test_video_layers.cpp
         tests/test_audio.cpp)
 
     target_link_libraries(openmotion_tests
         PRIVATE
             OpenMotion::openmotion_core
+            nlohmann_json::nlohmann_json
             Catch2::Catch2WithMain)
 
     target_compile_definitions(openmotion_tests
