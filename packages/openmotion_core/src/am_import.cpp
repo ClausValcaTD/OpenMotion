@@ -472,17 +472,13 @@ bool Converter::convert_shape(const pugi::xml_node& node) {
             has_size = true;
         }
     }
-    const bool is_shape = layer.type == project::LayerType::Rect ||
-                          layer.type == project::LayerType::Circle ||
-                          layer.type == project::LayerType::RoundRect;
-    if (is_shape && !has_size) {
+    // Every shape carries a `size`; without it there is no geometry to import.
+    if (!has_size) {
         skip(label, "size property is missing");
         return true;
     }
-    if (has_size) {
-        layer.width = 2.0 * size_x;
-        layer.height = 2.0 * size_y;
-    }
+    layer.width = 2.0 * size_x;
+    layer.height = 2.0 * size_y;
 
     // Fill colour.
     double alpha = 1.0;
